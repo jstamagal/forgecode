@@ -264,7 +264,7 @@ mod tests {
             ToolName::new("read"),
             ToolName::new("sage"),
             ToolName::new("patch"),
-            ToolName::new("sem_search"),
+            ToolName::new("fs_search"),
         ];
 
         let actual = ToolOrder::from_tool_list(&fixture);
@@ -275,7 +275,7 @@ mod tests {
         assert_eq!(names[1], "read");
         assert_eq!(names[2], "sage");
         assert_eq!(names[3], "patch");
-        assert_eq!(names[4], "sem_search");
+        assert_eq!(names[4], "fs_search");
     }
 
     #[test]

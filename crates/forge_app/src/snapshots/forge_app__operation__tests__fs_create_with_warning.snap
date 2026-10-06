@@ -12,7 +12,7 @@ expression: to_value(actual)
   path="/home/user/file_with_warning.txt"
 >
 </file>
-<details>The file was written successfully but contains 1 syntax error(s)</details>
+<details>The file was written successfully but the edit introduced 1 syntax error(s)</details>
 <error
   line="10"
   column="5"

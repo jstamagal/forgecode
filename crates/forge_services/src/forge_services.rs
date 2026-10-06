@@ -6,9 +6,8 @@ use forge_app::{
     McpServerInfra, Services, StrategyFactory, UserInfra, WalkerInfra,
 };
 use forge_domain::{
-    ChatRepository, ConversationRepository, FuzzySearchRepository, ProviderRepository,
-    SkillRepository, SnapshotRepository, TextPatchRepository, ValidationRepository,
-    WorkspaceIndexRepository,
+    ChatRepository, ConversationRepository, ProviderRepository, SkillRepository,
+    SnapshotRepository, WorkspaceIndexRepository,
 };
 
 use crate::ForgeProviderAuthService;
@@ -26,8 +25,8 @@ use crate::policy::ForgePolicyService;
 use crate::provider_service::ForgeProviderService;
 use crate::template::ForgeTemplateService;
 use crate::tool_services::{
-    ForgeFetch, ForgeFollowup, ForgeFsPatch, ForgeFsRead, ForgeFsRemove, ForgeFsSearch,
-    ForgeFsUndo, ForgeFsWrite, ForgeImageRead, ForgePlanCreate, ForgeShell, ForgeSkillFetch,
+    ForgeFetch, ForgeFsPatch, ForgeFsRead, ForgeFsRemove, ForgeFsSearch, ForgeFsUndo,
+    ForgeFsWrite, ForgeImageRead, ForgePlanCreate, ForgeShell, ForgeSkillFetch,
 };
 
 type McpService<F> = ForgeMcpService<ForgeMcpManager<F>, F, <F as McpServerInfra>::Client>;
@@ -53,8 +52,7 @@ pub struct ForgeServices<
         + ProviderRepository
         + WorkspaceIndexRepository
         + AgentRepository
-        + SkillRepository
-        + ValidationRepository,
+        + SkillRepository,
 > {
     chat_service: Arc<ForgeProviderService<F>>,
     config_service: Arc<ForgeAppConfigService<F>>,
@@ -73,7 +71,6 @@ pub struct ForgeServices<
     file_undo_service: Arc<ForgeFsUndo<F>>,
     shell_service: Arc<ForgeShell<F>>,
     fetch_service: Arc<ForgeFetch>,
-    followup_service: Arc<ForgeFollowup<F>>,
     mcp_service: Arc<McpService<F>>,
     custom_instructions_service: Arc<ForgeCustomInstructionsService<F>>,
     auth_service: Arc<AuthService<F>>,
@@ -104,8 +101,7 @@ impl<
         + KVStore
         + WorkspaceIndexRepository
         + AgentRepository
-        + SkillRepository
-        + ValidationRepository,
+        + SkillRepository,
 > ForgeServices<F>
 {
     pub fn new(infra: Arc<F>) -> Self {
@@ -128,7 +124,6 @@ impl<
         let file_undo_service = Arc::new(ForgeFsUndo::new(infra.clone()));
         let shell_service = Arc::new(ForgeShell::new(infra.clone()));
         let fetch_service = Arc::new(ForgeFetch::new());
-        let followup_service = Arc::new(ForgeFollowup::new(infra.clone()));
         let custom_instructions_service =
             Arc::new(ForgeCustomInstructionsService::new(infra.clone()));
         let agent_registry_service = Arc::new(ForgeAgentRegistryService::new(infra.clone()));
@@ -158,7 +153,6 @@ impl<
             file_undo_service,
             shell_service,
             fetch_service,
-            followup_service,
             mcp_service,
             custom_instructions_service,
             auth_service,
@@ -198,9 +192,6 @@ impl<
         + SkillRepository
         + StrategyFactory
         + WorkspaceIndexRepository
-        + ValidationRepository
-        + FuzzySearchRepository
-        + TextPatchRepository
         + Clone
         + 'static,
 > Services for ForgeServices<F>
@@ -224,7 +215,6 @@ impl<
     type ImageReadService = ForgeImageRead<F>;
     type FsRemoveService = ForgeFsRemove<F>;
     type FsSearchService = ForgeFsSearch<F>;
-    type FollowUpService = ForgeFollowup<F>;
     type FsUndoService = ForgeFsUndo<F>;
     type NetFetchService = ForgeFetch;
     type ShellService = ForgeShell<F>;
@@ -289,10 +279,6 @@ impl<
         &self.file_search_service
     }
 
-    fn follow_up_service(&self) -> &Self::FollowUpService {
-        &self.followup_service
-    }
-
     fn fs_undo_service(&self) -> &Self::FsUndoService {
         &self.file_undo_service
     }
@@ -354,7 +340,6 @@ impl<
         + WorkspaceIndexRepository
         + AgentRepository
         + SkillRepository
-        + ValidationRepository
         + Send
         + Sync,
 > forge_app::EnvironmentInfra for ForgeServices<F>

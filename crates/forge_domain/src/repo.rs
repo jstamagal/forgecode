@@ -5,15 +5,9 @@ use url::Url;
 
 use crate::{
     AnyProvider, AuthCredential, ChatCompletionMessage, Context, Conversation, ConversationId,
-    MigrationResult, Model, ModelId, Provider, ProviderId, ProviderTemplate, ResultStream,
-    SearchMatch, Skill, Snapshot, WorkspaceAuth, WorkspaceId,
+    MigrationResult, Model, ModelId, Provider, ProviderId, ProviderTemplate, ResultStream, Skill,
+    Snapshot, WorkspaceAuth, WorkspaceId,
 };
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TextPatchBlock {
-    pub patch: String,
-    pub patched_text: String,
-}
 
 /// Repository for managing file snapshots
 ///
@@ -189,62 +183,4 @@ pub trait SkillRepository: Send + Sync {
     /// # Errors
     /// Returns an error if skill loading fails
     async fn load_skills(&self) -> Result<Vec<Skill>>;
-}
-
-/// Repository for validating file syntax
-///
-/// This repository provides operations for validating the syntax of source
-/// code files using remote validation services.
-#[async_trait::async_trait]
-pub trait ValidationRepository: Send + Sync {
-    /// Validates the syntax of a single file
-    ///
-    /// # Arguments
-    /// * `path` - Path to the file (used for determining language and in error
-    ///   messages)
-    /// * `content` - Content of the file to validate
-    ///
-    /// # Returns
-    /// * `Ok(vec![])` - File is valid or file type is not supported by backend
-    /// * `Ok(errors)` - Validation failed with list of syntax errors
-    /// * `Err(_)` - Communication error with validation service
-    async fn validate_file(
-        &self,
-        path: impl AsRef<std::path::Path> + Send,
-        content: &str,
-    ) -> Result<Vec<crate::SyntaxError>>;
-}
-
-/// Repository for fuzzy searching text
-///
-/// This repository provides fuzzy search functionality for searching
-/// needle in haystack with optional search_all flag.
-#[async_trait::async_trait]
-pub trait FuzzySearchRepository: Send + Sync {
-    /// Performs a fuzzy search for a needle in a haystack
-    ///
-    /// # Arguments
-    /// * `needle` - The string to search for
-    /// * `haystack` - The text to search in
-    /// * `search_all` - Whether to search all matches or just the first
-    ///
-    /// # Returns
-    /// * `Ok(Vec<SearchMatch>)` - List of matches with line ranges
-    /// * `Err(_)` - Communication error with search service
-    async fn fuzzy_search(
-        &self,
-        needle: &str,
-        haystack: &str,
-        search_all: bool,
-    ) -> Result<Vec<SearchMatch>>;
-}
-
-#[async_trait::async_trait]
-pub trait TextPatchRepository: Send + Sync {
-    async fn build_text_patch(
-        &self,
-        haystack: &str,
-        old_string: &str,
-        new_string: &str,
-    ) -> Result<TextPatchBlock>;
 }

@@ -7,8 +7,9 @@ use forge_app::{
     FileDirectoryInfra, FileInfoInfra, FileReaderInfra, FileWriterInfra, FsWriteOutput,
     FsWriteService, compute_hash,
 };
-use forge_domain::{SnapshotRepository, ValidationRepository};
+use forge_domain::SnapshotRepository;
 
+use crate::tool_services::syn::introduced_errors;
 use crate::utils::assert_absolute_path;
 
 /// Service for creating files with snapshot coordination
@@ -38,7 +39,6 @@ impl<
         + FileReaderInfra
         + FileWriterInfra
         + SnapshotRepository
-        + ValidationRepository
         + Send
         + Sync,
 > FsWriteService for ForgeFsWrite<F>
@@ -51,13 +51,6 @@ impl<
     ) -> anyhow::Result<FsWriteOutput> {
         let path = Path::new(&path);
         assert_absolute_path(path)?;
-
-        // Validate file syntax using remote validation API (graceful failure)
-        let errors = self
-            .infra
-            .validate_file(path, &content)
-            .await
-            .unwrap_or_default();
 
         if let Some(parent) = Path::new(&path).parent() {
             self.infra
@@ -113,6 +106,9 @@ impl<
 
         // Compute hash of the normalized content that was written
         let content_hash = compute_hash(&normalized_content);
+
+        // Local parse: report only syntax errors this write introduced
+        let errors = introduced_errors(path, old_content.as_deref(), &normalized_content);
 
         Ok(FsWriteOutput {
             path: path.display().to_string(),

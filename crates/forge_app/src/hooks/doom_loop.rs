@@ -734,8 +734,8 @@ mod tests {
             .arguments(ToolCallArguments::from_json(r#"{"command": "ls"}"#));
         let tool_5 = ToolCallFull::new("fs_search")
             .arguments(ToolCallArguments::from_json(r#"{"pattern": "test"}"#));
-        let tool_6 = ToolCallFull::new("sem_search")
-            .arguments(ToolCallArguments::from_json(r#"{"queries": []}"#));
+        let tool_6 = ToolCallFull::new("fetch")
+            .arguments(ToolCallArguments::from_json(r#"{"url": "https://example.com"}"#));
 
         // Sequence: 1234546454545
         // Let's build it step by step and check at each step

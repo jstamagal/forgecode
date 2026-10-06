@@ -44,14 +44,11 @@ pub enum ToolCatalog {
     #[serde(alias = "Write")]
     Write(FSWrite),
     FsSearch(FSSearch),
-    SemSearch(SemanticSearch),
     Remove(FSRemove),
     Patch(FSPatch),
-    MultiPatch(FSMultiPatch),
     Undo(FSUndo),
     Shell(Shell),
     Fetch(NetFetch),
-    Followup(Followup),
     Plan(PlanCreate),
     Skill(SkillFetch),
     TodoWrite(TodoWrite),
@@ -319,166 +316,11 @@ pub enum OutputMode {
     Count,
 }
 
-/// A paired query and use_case for semantic search. Each query must have a
-/// corresponding use_case for document reranking.
-#[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct SearchQuery {
-    /// The semantic embedding query that describes WHAT the code does or its
-    /// purpose. This query is converted to a vector embedding and used to find
-    /// semantically similar code chunks in the vector database.
-    ///
-    /// **Guidelines for effective embedding queries:**
-    /// - Use specific, targeted technical terms and domain concepts
-    /// - Describe behavior, functionality, patterns, or implementation approach
-    /// - Include concrete keywords like technology names, algorithms, data
-    ///   structures
-    /// - Balance specificity (focused results) with generality (avoid missing
-    ///   relevant code)
-    /// - Keep queries focused - overly broad queries cause timeouts and poor
-    ///   results
-    /// - **Align keywords with intent**: For documentation, use "README",
-    ///   "guide", "setup"; for implementation, use "function", "logic",
-    ///   "handler"
-    ///
-    /// **Good examples:**
-    /// - "exponential backoff retry mechanism with configurable delays"
-    /// - "streaming LLM responses with SSE chunked transfer encoding"
-    /// - "OAuth2 token refresh with automatic retry and expiry check"
-    /// - "Diesel database migration runner with transaction support"
-    /// - "semantic search reranker using cross-encoder model"
-    /// - "README documentation configuration setup semantic search"
-    /// - "markdown guide API documentation tool definitions"
-    ///
-    /// **Bad examples:**
-    /// - "retry" (too generic, will match everything)
-    /// - "authentication" (overly broad - specify what aspect: login, tokens,
-    ///   middleware?)
-    /// - "tool definitions schemas" (too vague - be more specific about
-    ///   structure or location)
-    /// - "how system works" (meta-question, not searchable concept)
-    /// - "function that validates" (focus on what it validates, not that it's a
-    ///   function)
-    pub query: String,
-
-    /// The reranking query that describes your INTENT and WHY you need this
-    /// code. This query is used by the reranker model to filter and
-    /// prioritize the most relevant results from the initial embedding
-    /// search based on your specific use case.
-    ///
-    /// **Purpose:** While `query` casts a wide net for similar code, `use_case`
-    /// narrows it down by intent: implementation vs docs vs tests, reading
-    /// vs modifying code, understanding architecture vs finding bugs, etc.
-    ///
-    /// **Guidelines for effective reranking queries:**
-    /// - **MANDATORY FOR CODE**: ALWAYS include codebase construct keywords
-    ///   (struct, trait, impl, interface, class, function, fn, definition,
-    ///   implementation, declaration, type) when searching for code
-    /// - **WHY CRITICAL**: The reranker gives HIGH WEIGHTAGE to these keywords
-    ///   - "struct" → prioritizes struct definitions
-    ///   - "trait impl" → prioritizes trait implementations
-    ///   - "function" / "fn" → prioritizes function definitions
-    ///   - Without these, you get documentation instead of code!
-    /// - Clearly state your goal: understand, modify, debug, find examples,
-    ///   etc.
-    /// - Specify the TYPE of code you need: implementation, tests, docs,
-    ///   config, architecture
-    /// - Include WHY context: "to fix a bug", "to add a feature", "to
-    ///   understand flow"
-    /// - Be explicit about what to AVOID: "not tests", "not documentation",
-    ///   "not examples"
-    /// - **Match intent to file types**: documentation intent → avoid
-    ///   requesting "implementation code"; implementation intent → avoid
-    ///   requesting "documentation"
-    /// - Keep it concise (1-2 sentences) but informative
-    /// - MUST be different from the embedding query - add intent/context
-    ///
-    /// **Good examples (ALWAYS include construct keywords):**
-    /// - "I need the struct definition and trait implementation for Diesel
-    ///   migrations to understand the transaction handling, not setup docs"
-    /// - "Show me the function implementation for semantic search reranker so I
-    ///   can modify it to support file type filtering"
-    /// - "Find the type declarations and interface definitions for the tool
-    ///   registry, not the usage examples"
-    /// - "I'm debugging a timeout issue and need the function implementation
-    ///   that handles streaming responses, not the API documentation"
-    /// - "Show me the struct definitions and trait implementations for
-    ///   authentication, not the setup guide"
-    /// - "I need the impl block for workspace sync to understand how it detects
-    ///   file changes"
-    /// - "Find the fn definitions for embedding generation batching logic"
-    /// - "I need documentation explaining how to configure semantic search, not
-    ///   the implementation code"
-    /// - "Find the README or setup guide that explains the tool registration
-    ///   process, avoiding implementation details"
-    ///
-    /// **Bad examples (missing construct keywords = FAILS):**
-    /// - "I need code that handles authentication" ❌ MISSING:
-    ///   struct/trait/impl/function
-    /// - "Show me the database logic" ❌ MISSING: trait/impl/function keywords
-    /// - "I need the workspace sync implementation" ❌ MISSING: struct/impl/fn
-    ///   - too generic
-    /// - "Find the reranker code" ❌ MISSING: struct/trait/impl/function
-    /// - "exponential backoff retry mechanism" ❌ MISSING: WHY + construct
-    ///   keywords
-    /// - "find authentication code" ❌ MISSING: which construct? struct? trait?
-    ///   impl?
-    /// - "tool definitions" ❌ MISSING: struct? trait? type? be specific
-    /// - "how it works" (too vague - specify what you want to understand)
-    /// - Long rambling explanation without clear intent (keep it focused)
-    pub use_case: String,
-}
-
-impl SearchQuery {
-    /// Creates a new search query with the given query and use_case
-    pub fn new(query: impl Into<String>, use_case: impl Into<String>) -> Self {
-        Self { query: query.into(), use_case: use_case.into() }
-    }
-}
-
-#[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
-#[tool_description_file = "crates/forge_domain/src/tools/descriptions/semantic_search.md"]
-pub struct SemanticSearch {
-    /// List of search queries to execute in parallel. Using multiple queries
-    /// (2-3) with varied phrasings significantly improves results - each query
-    /// captures different aspects of what you're looking for. Each query pairs
-    /// a search term with a use_case for reranking. Example: for
-    /// authentication, try "user login verification", "token generation",
-    /// "OAuth flow".
-    pub queries: Vec<SearchQuery>,
-}
-
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
 #[tool_description_file = "crates/forge_domain/src/tools/descriptions/fs_remove.md"]
 pub struct FSRemove {
     /// The path of the file to remove (absolute path required)
     pub path: String,
-}
-
-/// Operation types that can be performed on matched text
-#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, AsRefStr, EnumIter)]
-#[serde(rename_all = "snake_case")]
-pub enum PatchOperation {
-    /// Prepend content before the matched text
-    #[default]
-    Prepend,
-
-    /// Append content after the matched text
-    Append,
-
-    /// Should be used only when you want to replace the first occurrence.
-    /// Use only for specific, targeted replacements where you need to modify
-    /// just the first match.
-    Replace,
-
-    /// Should be used for renaming variables, functions, types, or any
-    /// widespread replacements across the file. This is the recommended
-    /// choice for consistent refactoring operations as it ensures all
-    /// occurrences are updated.
-    ReplaceAll,
-
-    /// Swap the matched text with another text (search for the second text and
-    /// swap them)
-    Swap,
 }
 
 /// Helper trait to generate simple string enum schemas for unit enums.
@@ -514,16 +356,6 @@ trait SimpleEnumSchema: AsRef<str> + IntoEnumIterator {
 // IntoEnumIterator
 impl<T> SimpleEnumSchema for T where T: AsRef<str> + IntoEnumIterator {}
 
-impl JsonSchema for PatchOperation {
-    fn schema_name() -> Cow<'static, str> {
-        <Self as SimpleEnumSchema>::simple_enum_schema_name()
-    }
-
-    fn json_schema(r#gen: &mut schemars::generate::SchemaGenerator) -> Schema {
-        <Self as SimpleEnumSchema>::simple_enum_schema(r#gen)
-    }
-}
-
 impl JsonSchema for OutputMode {
     fn schema_name() -> Cow<'static, str> {
         <Self as SimpleEnumSchema>::simple_enum_schema_name()
@@ -534,50 +366,152 @@ impl JsonSchema for OutputMode {
     }
 }
 
+/// Input for the `patch` tool: either the scalar form (`old_string`,
+/// `new_string`, `replace_all`) or the batch form (`edits`), never both.
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
 #[tool_description_file = "crates/forge_domain/src/tools/descriptions/fs_patch.md"]
+#[schemars(deny_unknown_fields)]
 pub struct FSPatch {
-    /// The absolute path to the file to modify
+    /// Path of the file to modify.
     #[serde(alias = "path")]
     pub file_path: String,
 
-    /// The text to replace
+    /// Exact text to replace (scalar form).
+    #[serde(default, alias = "search", skip_serializing_if = "Option::is_none")]
+    pub old_string: Option<String>,
+
+    /// Replacement text; must differ from old_string (scalar form).
+    #[serde(default, alias = "content", skip_serializing_if = "Option::is_none")]
+    pub new_string: Option<String>,
+
+    /// Replace every occurrence of old_string instead of requiring exactly
+    /// one (scalar form, default false).
+    #[serde(default, skip_serializing_if = "is_default")]
+    #[schemars(default)]
+    pub replace_all: bool,
+
+    /// Several replacements applied in order, each seeing the previous
+    /// result. Never combined with the scalar form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1))]
+    pub edits: Option<Vec<PatchEdit>>,
+}
+
+impl FSPatch {
+    /// Creates a scalar-form patch input.
+    ///
+    /// # Arguments
+    /// * `file_path` - Path of the file to modify.
+    /// * `old_string` - Exact text to replace.
+    /// * `new_string` - Replacement text.
+    pub fn new(
+        file_path: impl Into<String>,
+        old_string: impl Into<String>,
+        new_string: impl Into<String>,
+    ) -> Self {
+        Self {
+            file_path: file_path.into(),
+            old_string: Some(old_string.into()),
+            new_string: Some(new_string.into()),
+            replace_all: false,
+            edits: None,
+        }
+    }
+
+    /// Creates a batch-form patch input.
+    ///
+    /// # Arguments
+    /// * `file_path` - Path of the file to modify.
+    /// * `edits` - Edits applied in order.
+    pub fn batch(file_path: impl Into<String>, edits: Vec<PatchEdit>) -> Self {
+        Self {
+            file_path: file_path.into(),
+            old_string: None,
+            new_string: None,
+            replace_all: false,
+            edits: Some(edits),
+        }
+    }
+
+    /// Sets the scalar `replace_all` flag.
+    pub fn replace_all(mut self, replace_all: bool) -> Self {
+        self.replace_all = replace_all;
+        self
+    }
+
+    /// Resolves the input into the ordered list of edits to apply.
+    ///
+    /// # Errors
+    /// Returns an error when both forms are given, when neither form is
+    /// complete, or when `edits` is empty.
+    pub fn resolve_edits(&self) -> anyhow::Result<Vec<PatchEdit>> {
+        match &self.edits {
+            Some(_)
+                if self.old_string.is_some() || self.new_string.is_some() || self.replace_all =>
+            {
+                anyhow::bail!(
+                    "pass either the scalar form (old_string/new_string/replace_all) or edits, not both"
+                )
+            }
+            Some(edits) if edits.is_empty() => {
+                anyhow::bail!("edits must be a non-empty list of {{old_string, new_string}} objects")
+            }
+            Some(edits) => Ok(edits.clone()),
+            None => match (&self.old_string, &self.new_string) {
+                (Some(old_string), Some(new_string)) => Ok(vec![PatchEdit {
+                    old_string: old_string.clone(),
+                    new_string: new_string.clone(),
+                    replace_all: self.replace_all,
+                }]),
+                _ => anyhow::bail!("old_string and new_string are required (or pass edits)"),
+            },
+        }
+    }
+
+    /// Whether the call uses the batch (`edits`) form.
+    pub fn is_batch(&self) -> bool {
+        self.edits.is_some()
+    }
+}
+
+/// A single replacement inside a batch `patch` call.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[schemars(deny_unknown_fields)]
+pub struct PatchEdit {
+    /// Exact text to replace.
     #[serde(alias = "search")]
     pub old_string: String,
 
-    /// The text to replace it with (must be different from old_string)
+    /// Replacement text; must differ from old_string.
     #[serde(alias = "content")]
     pub new_string: String,
 
-    /// Replace all occurrences of old_string (default false)
+    /// Replace every occurrence of old_string instead of requiring exactly
+    /// one (default false).
     #[serde(default)]
     #[schemars(default)]
     pub replace_all: bool,
 }
 
-/// A single edit operation in a multi-patch
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
-pub struct PatchEdit {
-    /// The text to replace
-    pub old_string: String,
+impl PatchEdit {
+    /// Creates a single-occurrence edit.
+    ///
+    /// # Arguments
+    /// * `old_string` - Exact text to replace.
+    /// * `new_string` - Replacement text.
+    pub fn new(old_string: impl Into<String>, new_string: impl Into<String>) -> Self {
+        Self {
+            old_string: old_string.into(),
+            new_string: new_string.into(),
+            replace_all: false,
+        }
+    }
 
-    /// The text to replace it with (must be different from old_string)
-    pub new_string: String,
-
-    /// Replace all occurrences of old_string (default false)
-    #[serde(default)]
-    #[schemars(default)]
-    pub replace_all: bool,
-}
-
-#[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
-#[tool_description_file = "crates/forge_domain/src/tools/descriptions/fs_multi_patch.md"]
-pub struct FSMultiPatch {
-    /// The absolute path to the file to modify
-    pub file_path: String,
-
-    /// Array of edit operations to perform sequentially on the file
-    pub edits: Vec<PatchEdit>,
+    /// Sets the `replace_all` flag.
+    pub fn replace_all(mut self, replace_all: bool) -> Self {
+        self.replace_all = replace_all;
+        self
+    }
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
@@ -635,38 +569,6 @@ pub struct NetFetch {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw: Option<bool>,
-}
-
-#[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
-#[tool_description_file = "crates/forge_domain/src/tools/descriptions/followup.md"]
-pub struct Followup {
-    /// Question to ask the user
-    pub question: String,
-
-    /// If true, allows selecting multiple options; if false (default), only one
-    /// option can be selected
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub multiple: Option<bool>,
-
-    /// First option to choose from
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub option1: Option<String>,
-
-    /// Second option to choose from
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub option2: Option<String>,
-
-    /// Third option to choose from
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub option3: Option<String>,
-
-    /// Fourth option to choose from
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub option4: Option<String>,
-
-    /// Fifth option to choose from
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub option5: Option<String>,
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
@@ -812,12 +714,9 @@ impl ToolDescription for ToolCatalog {
     fn description(&self) -> String {
         match self {
             ToolCatalog::Patch(v) => v.description(),
-            ToolCatalog::MultiPatch(v) => v.description(),
             ToolCatalog::Shell(v) => v.description(),
-            ToolCatalog::Followup(v) => v.description(),
             ToolCatalog::Fetch(v) => v.description(),
             ToolCatalog::FsSearch(v) => v.description(),
-            ToolCatalog::SemSearch(v) => v.description(),
             ToolCatalog::Read(v) => v.description(),
             ToolCatalog::Remove(v) => v.description(),
             ToolCatalog::Undo(v) => v.description(),
@@ -872,12 +771,9 @@ impl ToolCatalog {
 
         let mut schema = match self {
             ToolCatalog::Patch(_) => r#gen.into_root_schema_for::<FSPatch>(),
-            ToolCatalog::MultiPatch(_) => r#gen.into_root_schema_for::<FSMultiPatch>(),
             ToolCatalog::Shell(_) => r#gen.into_root_schema_for::<Shell>(),
-            ToolCatalog::Followup(_) => r#gen.into_root_schema_for::<Followup>(),
             ToolCatalog::Fetch(_) => r#gen.into_root_schema_for::<NetFetch>(),
             ToolCatalog::FsSearch(_) => r#gen.into_root_schema_for::<FSSearch>(),
-            ToolCatalog::SemSearch(_) => r#gen.into_root_schema_for::<SemanticSearch>(),
             ToolCatalog::Read(_) => r#gen.into_root_schema_for::<FSRead>(),
             ToolCatalog::Remove(_) => r#gen.into_root_schema_for::<FSRemove>(),
             ToolCatalog::Undo(_) => r#gen.into_root_schema_for::<FSUndo>(),
@@ -903,13 +799,6 @@ impl ToolCatalog {
     pub fn contains(tool_name: &ToolName) -> bool {
         let normalized = normalize_tool_name(tool_name);
         FORGE_TOOLS.contains(&normalized)
-    }
-    pub fn should_yield(tool_name: &ToolName) -> bool {
-        // Tools that convey that the execution should yield
-        let normalized = normalize_tool_name(tool_name);
-        [ToolKind::Followup]
-            .iter()
-            .any(|v| v.to_string().to_case(Case::Snake).eq(normalized.as_str()))
     }
 
     pub fn requires_stdout(tool_name: &ToolName) -> bool {
@@ -981,20 +870,21 @@ impl ToolCatalog {
                 cwd,
                 message: format!("Remove file: {}", display_path_for(&input.path)),
             }),
-            ToolCatalog::Patch(input) => Some(crate::policies::PermissionOperation::Write {
-                path: std::path::PathBuf::from(&input.file_path),
-                cwd,
-                message: format!("Modify file: {}", display_path_for(&input.file_path)),
-            }),
-            ToolCatalog::MultiPatch(input) => Some(crate::policies::PermissionOperation::Write {
-                path: std::path::PathBuf::from(&input.file_path),
-                cwd,
-                message: format!(
-                    "Modify file with {} edits: {}",
-                    input.edits.len(),
-                    display_path_for(&input.file_path)
-                ),
-            }),
+            ToolCatalog::Patch(input) => {
+                let message = match &input.edits {
+                    Some(edits) => format!(
+                        "Modify file with {} edits: {}",
+                        edits.len(),
+                        display_path_for(&input.file_path)
+                    ),
+                    None => format!("Modify file: {}", display_path_for(&input.file_path)),
+                };
+                Some(crate::policies::PermissionOperation::Write {
+                    path: std::path::PathBuf::from(&input.file_path),
+                    cwd,
+                    message,
+                })
+            }
             ToolCatalog::Shell(input) => Some(crate::policies::PermissionOperation::Execute {
                 command: input.command.clone(),
                 cwd,
@@ -1005,9 +895,7 @@ impl ToolCatalog {
                 message: format!("Fetch content from URL: {}", input.url),
             }),
             // Operations that don't require permission checks
-            ToolCatalog::SemSearch(_)
-            | ToolCatalog::Undo(_)
-            | ToolCatalog::Followup(_)
+            ToolCatalog::Undo(_)
             | ToolCatalog::Plan(_)
             | ToolCatalog::Skill(_)
             | ToolCatalog::TodoWrite(_)
@@ -1040,12 +928,9 @@ impl ToolCatalog {
         search: &str,
         replace_all: bool,
     ) -> ToolCallFull {
-        ToolCallFull::from(ToolCatalog::Patch(FSPatch {
-            file_path: path.to_string(),
-            old_string: search.to_string(),
-            new_string: content.to_string(),
-            replace_all,
-        }))
+        ToolCallFull::from(ToolCatalog::Patch(
+            FSPatch::new(path, search, content).replace_all(replace_all),
+        ))
     }
 
     /// Creates a Remove tool call with the specified path
@@ -1072,11 +957,6 @@ impl ToolCatalog {
         }))
     }
 
-    /// Creates a Semantic Search tool call with the specified queries
-    pub fn tool_call_semantic_search(queries: Vec<SearchQuery>) -> ToolCallFull {
-        ToolCallFull::from(ToolCatalog::SemSearch(SemanticSearch { queries }))
-    }
-
     /// Creates an Undo tool call with the specified path
     pub fn tool_call_undo(path: &str) -> ToolCallFull {
         ToolCallFull::from(ToolCatalog::Undo(FSUndo { path: path.to_string() }))
@@ -1086,14 +966,6 @@ impl ToolCatalog {
     pub fn tool_call_fetch(url: &str) -> ToolCallFull {
         ToolCallFull::from(ToolCatalog::Fetch(NetFetch {
             url: url.to_string(),
-            ..Default::default()
-        }))
-    }
-
-    /// Creates a Followup tool call with the specified question
-    pub fn tool_call_followup(question: &str) -> ToolCallFull {
-        ToolCallFull::from(ToolCatalog::Followup(Followup {
-            question: question.to_string(),
             ..Default::default()
         }))
     }
@@ -1567,148 +1439,48 @@ mod tests {
     fn test_fs_patch_backward_compatibility_path() {
         use crate::{ToolCallArguments, ToolCallFull};
 
-        // Test old field name "path" still works
         let tool_call = ToolCallFull {
             name: ToolName::new("patch"),
             call_id: None,
             arguments: ToolCallArguments::from_json(
-                r#"{"path": "/test/file.rs", "operation": "replace", "new_string": "new", "old_string": "old"}"#,
+                r#"{"path": "/test/file.rs", "new_string": "new", "old_string": "old"}"#,
             ),
             thought_signature: None,
         };
 
-        let actual = ToolCatalog::try_from(tool_call);
+        let actual = ToolCatalog::try_from(tool_call).unwrap();
 
-        assert!(
-            actual.is_ok(),
-            "Should successfully parse old 'path' field name"
-        );
-
-        if let Ok(ToolCatalog::Patch(fs_patch)) = actual {
-            assert_eq!(fs_patch.file_path, "/test/file.rs");
-        } else {
-            panic!("Expected FSPatch variant");
-        }
-    }
-
-    #[test]
-    fn test_fs_patch_backward_compatibility_search() {
-        use crate::{ToolCallArguments, ToolCallFull};
-
-        // Test old field name "search" still works
-        let tool_call = ToolCallFull {
-            name: ToolName::new("patch"),
-            call_id: None,
-            arguments: ToolCallArguments::from_json(
-                r#"{"file_path": "/test/file.rs", "operation": "replace", "new_string": "new", "search": "old text"}"#,
-            ),
-            thought_signature: None,
-        };
-
-        let actual = ToolCatalog::try_from(tool_call);
-
-        assert!(
-            actual.is_ok(),
-            "Should successfully parse old 'search' field name"
-        );
-
-        if let Ok(ToolCatalog::Patch(fs_patch)) = actual {
-            assert_eq!(fs_patch.old_string, "old text");
-        } else {
-            panic!("Expected FSPatch variant");
-        }
-    }
-
-    #[test]
-    fn test_fs_patch_backward_compatibility_content() {
-        use crate::{ToolCallArguments, ToolCallFull};
-
-        // Test old field name "content" still works
-        let tool_call = ToolCallFull {
-            name: ToolName::new("patch"),
-            call_id: None,
-            arguments: ToolCallArguments::from_json(
-                r#"{"file_path": "/test/file.rs", "operation": "replace", "content": "new content", "old_string": "old"}"#,
-            ),
-            thought_signature: None,
-        };
-
-        let actual = ToolCatalog::try_from(tool_call);
-
-        assert!(
-            actual.is_ok(),
-            "Should successfully parse old 'content' field name"
-        );
-
-        if let Ok(ToolCatalog::Patch(fs_patch)) = actual {
-            assert_eq!(fs_patch.new_string, "new content");
-        } else {
-            panic!("Expected FSPatch variant");
-        }
+        let expected = ToolCatalog::Patch(crate::FSPatch::new("/test/file.rs", "old", "new"));
+        assert_eq!(actual, expected);
     }
 
     #[test]
     fn test_fs_patch_backward_compatibility_all_old_fields() {
         use crate::{ToolCallArguments, ToolCallFull};
 
-        // Test all old field names together
         let tool_call = ToolCallFull {
             name: ToolName::new("patch"),
             call_id: None,
             arguments: ToolCallArguments::from_json(
-                r#"{"path": "/test/file.rs", "operation": "replace", "content": "new content", "search": "old text"}"#,
+                r#"{"path": "/test/file.rs", "content": "new content", "search": "old text"}"#,
             ),
             thought_signature: None,
         };
 
-        let actual = ToolCatalog::try_from(tool_call);
+        let actual = ToolCatalog::try_from(tool_call).unwrap();
 
-        assert!(
-            actual.is_ok(),
-            "Should successfully parse all old field names together"
-        );
-
-        if let Ok(ToolCatalog::Patch(fs_patch)) = actual {
-            assert_eq!(fs_patch.file_path, "/test/file.rs");
-            assert_eq!(fs_patch.old_string, "old text");
-            assert_eq!(fs_patch.new_string, "new content");
-        } else {
-            panic!("Expected FSPatch variant");
-        }
-    }
-
-    #[test]
-    fn test_fs_patch_new_field_names() {
-        use crate::{ToolCallArguments, ToolCallFull};
-
-        // Test new field names work as expected
-        let tool_call = ToolCallFull {
-            name: ToolName::new("patch"),
-            call_id: None,
-            arguments: ToolCallArguments::from_json(
-                r#"{"file_path": "/test/file.rs", "operation": "replace", "new_string": "new content", "old_string": "old text"}"#,
-            ),
-            thought_signature: None,
-        };
-
-        let actual = ToolCatalog::try_from(tool_call);
-
-        assert!(actual.is_ok(), "Should successfully parse new field names");
-
-        if let Ok(ToolCatalog::Patch(fs_patch)) = actual {
-            assert_eq!(fs_patch.file_path, "/test/file.rs");
-            assert_eq!(fs_patch.old_string, "old text");
-            assert_eq!(fs_patch.new_string, "new content");
-        } else {
-            panic!("Expected FSPatch variant");
-        }
+        let expected = ToolCatalog::Patch(crate::FSPatch::new(
+            "/test/file.rs",
+            "old text",
+            "new content",
+        ));
+        assert_eq!(actual, expected);
     }
 
     #[test]
     fn test_fs_patch_with_replace_all() {
         use crate::{ToolCallArguments, ToolCallFull};
 
-        // Test replace_all parameter
         let tool_call = ToolCallFull {
             name: ToolName::new("patch"),
             call_id: None,
@@ -1718,41 +1490,77 @@ mod tests {
             thought_signature: None,
         };
 
-        let actual = ToolCatalog::try_from(tool_call);
+        let actual = ToolCatalog::try_from(tool_call).unwrap();
 
-        assert!(
-            actual.is_ok(),
-            "Should successfully parse replace_all parameter"
+        let expected = ToolCatalog::Patch(
+            crate::FSPatch::new("/test/file.rs", "old", "new").replace_all(true),
         );
+        assert_eq!(actual, expected);
+    }
 
-        if let Ok(ToolCatalog::Patch(fs_patch)) = actual {
-            assert_eq!(fs_patch.replace_all, true);
-        } else {
-            panic!("Expected FSPatch variant");
-        }
+    #[test]
+    fn test_fs_patch_edits_form() {
+        use crate::{PatchEdit, ToolCallArguments, ToolCallFull};
+
+        let tool_call = ToolCallFull {
+            name: ToolName::new("patch"),
+            call_id: None,
+            arguments: ToolCallArguments::from_json(
+                r#"{"file_path": "/a.rs", "edits": [{"old_string": "a", "new_string": "b"}, {"old_string": "c", "new_string": "d", "replace_all": true}]}"#,
+            ),
+            thought_signature: None,
+        };
+
+        let actual = ToolCatalog::try_from(tool_call).unwrap();
+
+        let expected = ToolCatalog::Patch(crate::FSPatch::batch(
+            "/a.rs",
+            vec![
+                PatchEdit::new("a", "b"),
+                PatchEdit::new("c", "d").replace_all(true),
+            ],
+        ));
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_fs_patch_resolve_edits_scalar() {
+        let fixture = crate::FSPatch::new("/a.rs", "x", "y").replace_all(true);
+        let actual = fixture.resolve_edits().unwrap();
+        let expected = vec![crate::PatchEdit::new("x", "y").replace_all(true)];
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_fs_patch_resolve_edits_rejects_both_forms() {
+        let mut fixture = crate::FSPatch::new("/a.rs", "x", "y");
+        fixture.edits = Some(vec![crate::PatchEdit::new("a", "b")]);
+        let actual = fixture.resolve_edits().unwrap_err().to_string();
+        let expected = "pass either the scalar form (old_string/new_string/replace_all) or edits, not both";
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_fs_patch_resolve_edits_rejects_empty_and_missing() {
+        let empty = crate::FSPatch::batch("/a.rs", vec![]);
+        let missing = crate::FSPatch { file_path: "/a.rs".to_string(), ..Default::default() };
+        let actual = (
+            empty.resolve_edits().unwrap_err().to_string(),
+            missing.resolve_edits().unwrap_err().to_string(),
+        );
+        let expected = (
+            "edits must be a non-empty list of {old_string, new_string} objects".to_string(),
+            "old_string and new_string are required (or pass edits)".to_string(),
+        );
+        assert_eq!(actual, expected);
     }
 
     #[test]
     fn test_unit_enum_schema_generation() {
         use schemars::generate::SchemaSettings;
 
-        use crate::{OutputMode, PatchOperation};
+        use crate::OutputMode;
 
-        // Test PatchOperation schema
-        let settings = SchemaSettings::default().into_generator();
-        let patch_schema = settings.into_root_schema_for::<PatchOperation>();
-
-        // In schemars 1.0, Schema wraps serde_json::Value, so we check the JSON
-        // directly
-        let schema_value = patch_schema.as_value();
-        assert_eq!(schema_value.get("type"), Some(&serde_json::json!("string")));
-
-        let enum_values = schema_value.get("enum").and_then(|v| v.as_array()).unwrap();
-        assert_eq!(enum_values.len(), 5);
-        assert_eq!(enum_values[0], serde_json::json!("prepend"));
-        assert_eq!(enum_values[1], serde_json::json!("append"));
-
-        // Test OutputMode schema
         let settings = SchemaSettings::default().into_generator();
         let output_schema = settings.into_root_schema_for::<OutputMode>();
 

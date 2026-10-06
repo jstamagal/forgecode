@@ -12,7 +12,6 @@ max_read_lines = 2000
 max_requests_per_turn = 100
 max_search_lines = 1000
 max_search_result_bytes = 10240
-max_sem_search_results = 100
 max_stdout_line_chars = 500
 max_stdout_prefix_lines = 100
 max_stdout_suffix_lines = 100
@@ -20,7 +19,6 @@ max_tokens = 20480
 max_tool_failure_per_turn = 3
 model_cache_ttl_secs = 604800
 restricted = false
-sem_search_top_k = 10
 services_url = "https://api.forgecode.dev/"
 terminal_context = false
 tool_supported = true
@@ -34,7 +32,6 @@ currency_conversion_rate = 1.0
 subagents = true
 auto_install_vscode_extension = true
 use_forge_committer = true
-use_text_patch_fallback = false
 
 [retry]
 backoff_factor = 2

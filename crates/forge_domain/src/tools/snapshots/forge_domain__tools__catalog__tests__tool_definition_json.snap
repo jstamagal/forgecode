@@ -152,36 +152,6 @@ expression: tools
 {
   "type": "object",
   "properties": {
-    "queries": {
-      "description": "List of search queries to execute in parallel. Using multiple queries\n(2-3) with varied phrasings significantly improves results - each query\ncaptures different aspects of what you're looking for. Each query pairs\na search term with a use_case for reranking. Example: for\nauthentication, try \"user login verification\", \"token generation\",\n\"OAuth flow\".",
-      "type": "array",
-      "items": {
-        "description": "A paired query and use_case for semantic search. Each query must have a\ncorresponding use_case for document reranking.",
-        "type": "object",
-        "properties": {
-          "query": {
-            "description": "The semantic embedding query that describes WHAT the code does or its\npurpose. This query is converted to a vector embedding and used to find\nsemantically similar code chunks in the vector database.\n\n**Guidelines for effective embedding queries:**\n- Use specific, targeted technical terms and domain concepts\n- Describe behavior, functionality, patterns, or implementation approach\n- Include concrete keywords like technology names, algorithms, data\n  structures\n- Balance specificity (focused results) with generality (avoid missing\n  relevant code)\n- Keep queries focused - overly broad queries cause timeouts and poor\n  results\n- **Align keywords with intent**: For documentation, use \"README\",\n  \"guide\", \"setup\"; for implementation, use \"function\", \"logic\",\n  \"handler\"\n\n**Good examples:**\n- \"exponential backoff retry mechanism with configurable delays\"\n- \"streaming LLM responses with SSE chunked transfer encoding\"\n- \"OAuth2 token refresh with automatic retry and expiry check\"\n- \"Diesel database migration runner with transaction support\"\n- \"semantic search reranker using cross-encoder model\"\n- \"README documentation configuration setup semantic search\"\n- \"markdown guide API documentation tool definitions\"\n\n**Bad examples:**\n- \"retry\" (too generic, will match everything)\n- \"authentication\" (overly broad - specify what aspect: login, tokens,\n  middleware?)\n- \"tool definitions schemas\" (too vague - be more specific about\n  structure or location)\n- \"how system works\" (meta-question, not searchable concept)\n- \"function that validates\" (focus on what it validates, not that it's a\n  function)",
-            "type": "string"
-          },
-          "use_case": {
-            "description": "The reranking query that describes your INTENT and WHY you need this\ncode. This query is used by the reranker model to filter and\nprioritize the most relevant results from the initial embedding\nsearch based on your specific use case.\n\n**Purpose:** While `query` casts a wide net for similar code, `use_case`\nnarrows it down by intent: implementation vs docs vs tests, reading\nvs modifying code, understanding architecture vs finding bugs, etc.\n\n**Guidelines for effective reranking queries:**\n- **MANDATORY FOR CODE**: ALWAYS include codebase construct keywords\n  (struct, trait, impl, interface, class, function, fn, definition,\n  implementation, declaration, type) when searching for code\n- **WHY CRITICAL**: The reranker gives HIGH WEIGHTAGE to these keywords\n  - \"struct\" → prioritizes struct definitions\n  - \"trait impl\" → prioritizes trait implementations\n  - \"function\" / \"fn\" → prioritizes function definitions\n  - Without these, you get documentation instead of code!\n- Clearly state your goal: understand, modify, debug, find examples,\n  etc.\n- Specify the TYPE of code you need: implementation, tests, docs,\n  config, architecture\n- Include WHY context: \"to fix a bug\", \"to add a feature\", \"to\n  understand flow\"\n- Be explicit about what to AVOID: \"not tests\", \"not documentation\",\n  \"not examples\"\n- **Match intent to file types**: documentation intent → avoid\n  requesting \"implementation code\"; implementation intent → avoid\n  requesting \"documentation\"\n- Keep it concise (1-2 sentences) but informative\n- MUST be different from the embedding query - add intent/context\n\n**Good examples (ALWAYS include construct keywords):**\n- \"I need the struct definition and trait implementation for Diesel\n  migrations to understand the transaction handling, not setup docs\"\n- \"Show me the function implementation for semantic search reranker so I\n  can modify it to support file type filtering\"\n- \"Find the type declarations and interface definitions for the tool\n  registry, not the usage examples\"\n- \"I'm debugging a timeout issue and need the function implementation\n  that handles streaming responses, not the API documentation\"\n- \"Show me the struct definitions and trait implementations for\n  authentication, not the setup guide\"\n- \"I need the impl block for workspace sync to understand how it detects\n  file changes\"\n- \"Find the fn definitions for embedding generation batching logic\"\n- \"I need documentation explaining how to configure semantic search, not\n  the implementation code\"\n- \"Find the README or setup guide that explains the tool registration\n  process, avoiding implementation details\"\n\n**Bad examples (missing construct keywords = FAILS):**\n- \"I need code that handles authentication\" ❌ MISSING:\n  struct/trait/impl/function\n- \"Show me the database logic\" ❌ MISSING: trait/impl/function keywords\n- \"I need the workspace sync implementation\" ❌ MISSING: struct/impl/fn\n  - too generic\n- \"Find the reranker code\" ❌ MISSING: struct/trait/impl/function\n- \"exponential backoff retry mechanism\" ❌ MISSING: WHY + construct\n  keywords\n- \"find authentication code\" ❌ MISSING: which construct? struct? trait?\n  impl?\n- \"tool definitions\" ❌ MISSING: struct? trait? type? be specific\n- \"how it works\" (too vague - specify what you want to understand)\n- Long rambling explanation without clear intent (keep it focused)",
-            "type": "string"
-          }
-        },
-        "required": [
-          "query",
-          "use_case"
-        ]
-      }
-    }
-  },
-  "required": [
-    "queries"
-  ]
-}
-{
-  "type": "object",
-  "properties": {
     "path": {
       "description": "The path of the file to remove (absolute path required)",
       "type": "string"
@@ -192,70 +162,61 @@ expression: tools
   ]
 }
 {
-  "type": "object",
-  "properties": {
-    "file_path": {
-      "description": "The absolute path to the file to modify",
-      "type": "string"
-    },
-    "new_string": {
-      "description": "The text to replace it with (must be different from old_string)",
-      "type": "string"
-    },
-    "old_string": {
-      "description": "The text to replace",
-      "type": "string"
-    },
-    "replace_all": {
-      "description": "Replace all occurrences of old_string (default false)",
-      "type": "boolean",
-      "default": false
-    }
-  },
-  "required": [
-    "file_path",
-    "old_string",
-    "new_string"
-  ]
-}
-{
+  "description": "Input for the `patch` tool: either the scalar form (`old_string`,\n`new_string`, `replace_all`) or the batch form (`edits`), never both.",
   "type": "object",
   "properties": {
     "edits": {
-      "description": "Array of edit operations to perform sequentially on the file",
+      "description": "Several replacements applied in order, each seeing the previous\nresult. Never combined with the scalar form.",
       "type": "array",
       "items": {
-        "description": "A single edit operation in a multi-patch",
+        "description": "A single replacement inside a batch `patch` call.",
         "type": "object",
         "properties": {
           "new_string": {
-            "description": "The text to replace it with (must be different from old_string)",
+            "description": "Replacement text; must differ from old_string.",
             "type": "string"
           },
           "old_string": {
-            "description": "The text to replace",
+            "description": "Exact text to replace.",
             "type": "string"
           },
           "replace_all": {
-            "description": "Replace all occurrences of old_string (default false)",
+            "description": "Replace every occurrence of old_string instead of requiring exactly\none (default false).",
             "type": "boolean",
             "default": false
           }
         },
+        "additionalProperties": false,
         "required": [
           "old_string",
           "new_string"
         ]
-      }
+      },
+      "minItems": 1,
+      "nullable": true
     },
     "file_path": {
-      "description": "The absolute path to the file to modify",
+      "description": "Path of the file to modify.",
       "type": "string"
+    },
+    "new_string": {
+      "description": "Replacement text; must differ from old_string (scalar form).",
+      "type": "string",
+      "nullable": true
+    },
+    "old_string": {
+      "description": "Exact text to replace (scalar form).",
+      "type": "string",
+      "nullable": true
+    },
+    "replace_all": {
+      "description": "Replace every occurrence of old_string instead of requiring exactly\none (scalar form, default false).",
+      "type": "boolean"
     }
   },
+  "additionalProperties": false,
   "required": [
-    "file_path",
-    "edits"
+    "file_path"
   ]
 }
 {
@@ -320,48 +281,6 @@ expression: tools
   },
   "required": [
     "url"
-  ]
-}
-{
-  "type": "object",
-  "properties": {
-    "multiple": {
-      "description": "If true, allows selecting multiple options; if false (default), only one\noption can be selected",
-      "type": "boolean",
-      "nullable": true
-    },
-    "option1": {
-      "description": "First option to choose from",
-      "type": "string",
-      "nullable": true
-    },
-    "option2": {
-      "description": "Second option to choose from",
-      "type": "string",
-      "nullable": true
-    },
-    "option3": {
-      "description": "Third option to choose from",
-      "type": "string",
-      "nullable": true
-    },
-    "option4": {
-      "description": "Fourth option to choose from",
-      "type": "string",
-      "nullable": true
-    },
-    "option5": {
-      "description": "Fifth option to choose from",
-      "type": "string",
-      "nullable": true
-    },
-    "question": {
-      "description": "Question to ask the user",
-      "type": "string"
-    }
-  },
-  "required": [
-    "question"
   ]
 }
 {

@@ -68,42 +68,31 @@ impl FormatContent for ToolCatalog {
                 };
                 Some(TitleFormat::debug(title).into())
             }
-            ToolCatalog::SemSearch(input) => {
-                let pairs: Vec<_> = input
-                    .queries
-                    .iter()
-                    .map(|item| item.query.as_str())
-                    .collect();
-                Some(
-                    TitleFormat::debug("Codebase Search")
-                        .sub_title(format!("[{}]", pairs.join(" · ")))
-                        .into(),
-                )
-            }
             ToolCatalog::Remove(input) => {
                 let display_path = display_path_for(&input.path);
                 Some(TitleFormat::debug("Remove").sub_title(display_path).into())
             }
             ToolCatalog::Patch(input) => {
                 let display_path = display_path_for(&input.file_path);
-                let operation_name = if input.replace_all {
-                    "Replace All"
-                } else {
-                    "Replace"
-                };
-                Some(
-                    TitleFormat::debug(operation_name)
-                        .sub_title(display_path)
-                        .into(),
-                )
-            }
-            ToolCatalog::MultiPatch(input) => {
-                let display_path = display_path_for(&input.file_path);
-                Some(
-                    TitleFormat::debug("Replace")
-                        .sub_title(format!("{} ({} edits)", display_path, input.edits.len()))
-                        .into(),
-                )
+                match &input.edits {
+                    Some(edits) => Some(
+                        TitleFormat::debug("Replace")
+                            .sub_title(format!("{} ({} edits)", display_path, edits.len()))
+                            .into(),
+                    ),
+                    None => {
+                        let operation_name = if input.replace_all {
+                            "Replace All"
+                        } else {
+                            "Replace"
+                        };
+                        Some(
+                            TitleFormat::debug(operation_name)
+                                .sub_title(display_path)
+                                .into(),
+                        )
+                    }
+                }
             }
             ToolCatalog::Undo(input) => {
                 let display_path = display_path_for(&input.path);
@@ -117,11 +106,6 @@ impl FormatContent for ToolCatalog {
             ToolCatalog::Fetch(input) => {
                 Some(TitleFormat::debug("GET").sub_title(&input.url).into())
             }
-            ToolCatalog::Followup(input) => Some(
-                TitleFormat::debug("Follow-up")
-                    .sub_title(&input.question)
-                    .into(),
-            ),
             ToolCatalog::Plan(_) => None,
             ToolCatalog::Skill(input) => Some(
                 TitleFormat::debug("Skill")

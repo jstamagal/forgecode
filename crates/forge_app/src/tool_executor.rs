@@ -2,16 +2,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::anyhow;
-use forge_domain::{CodebaseQueryResult, ToolCallContext, ToolCatalog, ToolOutput};
+use forge_domain::{ToolCallContext, ToolCatalog, ToolOutput};
 
 use crate::fmt::content::FormatContent;
 use crate::operation::{TempContentFiles, ToolOperation};
 use crate::services::{Services, ShellService};
 use crate::{
-    AgentRegistry, ConversationService, EnvironmentInfra, FollowUpService, FsPatchService,
-    FsReadService, FsRemoveService, FsSearchService, FsUndoService, FsWriteService,
-    ImageReadService, NetFetchService, PlanCreateService, ProviderService, SkillFetchService,
-    WorkspaceService,
+    AgentRegistry, ConversationService, EnvironmentInfra, FsPatchService, FsReadService,
+    FsRemoveService, FsSearchService, FsUndoService, FsWriteService, ImageReadService,
+    NetFetchService, PlanCreateService, ProviderService, SkillFetchService,
 };
 
 pub struct ToolExecutor<S> {
@@ -23,13 +22,11 @@ impl<
         + ImageReadService
         + FsWriteService
         + FsSearchService
-        + WorkspaceService
         + NetFetchService
         + FsRemoveService
         + FsPatchService
         + FsUndoService
         + ShellService
-        + FollowUpService
         + ConversationService
         + EnvironmentInfra<Config = forge_config::ForgeConfig>
         + PlanCreateService
@@ -192,48 +189,6 @@ impl<
                 let output = self.services.search(params).await?;
                 (input, output).into()
             }
-            ToolCatalog::SemSearch(input) => {
-                let config = self.services.get_config()?;
-                let env = self.services.get_environment();
-                let services = self.services.clone();
-                let cwd = env.cwd.clone();
-                let limit = config.max_sem_search_results;
-                let top_k = config.sem_search_top_k as u32;
-                let params: Vec<_> = input
-                    .queries
-                    .iter()
-                    .map(|search_query| {
-                        forge_domain::SearchParams::new(&search_query.query, &search_query.use_case)
-                            .limit(limit)
-                            .top_k(top_k)
-                    })
-                    .collect();
-
-                // Execute all queries in parallel
-                let futures: Vec<_> = params
-                    .into_iter()
-                    .map(|param| services.query_workspace(cwd.clone(), param))
-                    .collect();
-
-                let mut results = futures::future::try_join_all(futures).await?;
-
-                // Deduplicate results across queries
-                crate::search_dedup::deduplicate_results(&mut results);
-
-                let output = input
-                    .queries
-                    .into_iter()
-                    .zip(results)
-                    .map(|(query, results)| CodebaseQueryResult {
-                        query: query.query,
-                        use_case: query.use_case,
-                        results,
-                    })
-                    .collect::<Vec<_>>();
-
-                let output = forge_domain::CodebaseSearchResults { queries: output };
-                ToolOperation::CodebaseSearch { output }
-            }
             ToolCatalog::Remove(input) => {
                 let normalized_path = self.normalize_path(input.path.clone());
                 let output = self.services.remove(normalized_path).await?;
@@ -241,22 +196,10 @@ impl<
             }
             ToolCatalog::Patch(input) => {
                 let normalized_path = self.normalize_path(input.file_path.clone());
+                let edits = input.resolve_edits()?;
                 let output = self
                     .services
-                    .patch(
-                        normalized_path,
-                        input.old_string.clone(),
-                        input.new_string.clone(),
-                        input.replace_all,
-                    )
-                    .await?;
-                (input, output).into()
-            }
-            ToolCatalog::MultiPatch(input) => {
-                let normalized_path = self.normalize_path(input.file_path.clone());
-                let output = self
-                    .services
-                    .multi_patch(normalized_path, input.edits.clone())
+                    .patch(normalized_path, edits, input.is_batch())
                     .await?;
                 (input, output).into()
             }
@@ -287,25 +230,6 @@ impl<
             ToolCatalog::Fetch(input) => {
                 let output = self.services.fetch(input.url.clone(), input.raw).await?;
                 (input, output).into()
-            }
-            ToolCatalog::Followup(input) => {
-                let output = self
-                    .services
-                    .follow_up(
-                        input.question.clone(),
-                        input
-                            .option1
-                            .clone()
-                            .into_iter()
-                            .chain(input.option2.clone())
-                            .chain(input.option3.clone())
-                            .chain(input.option4.clone())
-                            .chain(input.option5.clone())
-                            .collect(),
-                        input.multiple,
-                    )
-                    .await?;
-                output.into()
             }
             ToolCatalog::Plan(input) => {
                 let output = self
@@ -351,7 +275,6 @@ impl<
         // Enforce read-before-edit for patch operations
         let file_path = match &tool_input {
             ToolCatalog::Patch(input) => Some(&input.file_path),
-            ToolCatalog::MultiPatch(input) => Some(&input.file_path),
             _ => None,
         };
 

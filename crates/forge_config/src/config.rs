@@ -178,15 +178,7 @@ pub struct ForgeConfig {
     /// Maximum number of conversations shown in the conversation list.
     #[serde(default)]
     pub max_conversations: usize,
-    /// Maximum number of candidate results returned from the initial semantic
-    /// search vector query.
-    #[serde(default)]
-    pub max_sem_search_results: usize,
-    /// Number of top results retained after re-ranking in semantic search.
-    #[serde(default)]
-    pub sem_search_top_k: usize,
-    /// Base URL of the Forge services API used for semantic search and
-    /// indexing.
+    /// Base URL of the Forge services API used for workspace indexing.
     #[serde(default)]
     #[dummy(expr = "\"https://api.forgecode.dev/api\".to_string()")]
     pub services_url: String,
@@ -301,13 +293,6 @@ pub struct ForgeConfig {
     /// when a task ends and reminds the LLM about them.
     #[serde(default)]
     pub verify_todos: bool,
-
-    /// Switches patch replacement fallback from the legacy fuzzy-search range
-    /// lookup to the newer text-patch gRPC API.
-    /// Defaults to `false` so patching continues to use the legacy fallback
-    /// behavior unless explicitly enabled in `forge.toml`.
-    #[serde(default)]
-    pub use_text_patch_fallback: bool,
 
     /// Whether the deep research agent is available.
     ///

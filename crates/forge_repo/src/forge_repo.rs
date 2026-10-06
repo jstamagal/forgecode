@@ -11,10 +11,9 @@ use forge_app::{
 use forge_config::ForgeConfig;
 use forge_domain::{
     AnyProvider, AuthCredential, ChatCompletionMessage, ChatRepository, CommandOutput, Context,
-    Conversation, ConversationId, ConversationRepository, Environment, FileInfo,
-    FuzzySearchRepository, McpServerConfig, MigrationResult, Model, ModelId, Provider, ProviderId,
-    ProviderRepository, ResultStream, SearchMatch, Skill, SkillRepository, Snapshot,
-    SnapshotRepository, TextPatchBlock, TextPatchRepository,
+    Conversation, ConversationId, ConversationRepository, Environment, FileInfo, McpServerConfig,
+    MigrationResult, Model, ModelId, Provider, ProviderId, ProviderRepository, ResultStream, Skill,
+    SkillRepository, Snapshot, SnapshotRepository,
 };
 use forge_eventsource::EventSource;
 // Re-export CacacheStorage from forge_infra
@@ -28,10 +27,8 @@ use crate::context_engine::ForgeContextEngineRepository;
 use crate::conversation::ConversationRepositoryImpl;
 use crate::database::{DatabasePool, PoolConfig};
 use crate::fs_snap::ForgeFileSnapshotService;
-use crate::fuzzy_search::ForgeFuzzySearchRepository;
 use crate::provider::{ForgeChatRepository, ForgeProviderRepository};
 use crate::skill::ForgeSkillRepository;
-use crate::validation::ForgeValidationRepository;
 
 /// Repository layer that implements all domain repository traits
 ///
@@ -48,8 +45,6 @@ pub struct ForgeRepo<F> {
     codebase_repo: Arc<ForgeContextEngineRepository<F>>,
     agent_repository: Arc<ForgeAgentRepository<F>>,
     skill_repository: Arc<ForgeSkillRepository<F>>,
-    validation_repository: Arc<ForgeValidationRepository<F>>,
-    fuzzy_search_repository: Arc<ForgeFuzzySearchRepository<F>>,
 }
 
 impl<
@@ -81,8 +76,6 @@ impl<
         let codebase_repo = Arc::new(ForgeContextEngineRepository::new(infra.clone()));
         let agent_repository = Arc::new(ForgeAgentRepository::new(infra.clone()));
         let skill_repository = Arc::new(ForgeSkillRepository::new(infra.clone()));
-        let validation_repository = Arc::new(ForgeValidationRepository::new(infra.clone()));
-        let fuzzy_search_repository = Arc::new(ForgeFuzzySearchRepository::new(infra.clone()));
         Self {
             infra,
             file_snapshot_service,
@@ -93,8 +86,6 @@ impl<
             codebase_repo,
             agent_repository,
             skill_repository,
-            validation_repository,
-            fuzzy_search_repository,
         }
     }
 }
@@ -598,56 +589,6 @@ impl<F: GrpcInfra + Send + Sync> forge_domain::WorkspaceIndexRepository for Forg
         self.codebase_repo
             .delete_workspace(workspace_id, auth_token)
             .await
-    }
-}
-
-#[async_trait::async_trait]
-impl<F: GrpcInfra + Send + Sync> forge_domain::ValidationRepository for ForgeRepo<F> {
-    async fn validate_file(
-        &self,
-        path: impl AsRef<std::path::Path> + Send,
-        content: &str,
-    ) -> anyhow::Result<Vec<forge_domain::SyntaxError>> {
-        self.validation_repository
-            .validate_file(path, content)
-            .await
-    }
-}
-
-#[async_trait::async_trait]
-impl<F: GrpcInfra + Send + Sync> FuzzySearchRepository for ForgeRepo<F> {
-    async fn fuzzy_search(
-        &self,
-        needle: &str,
-        haystack: &str,
-        search_all: bool,
-    ) -> anyhow::Result<Vec<SearchMatch>> {
-        self.fuzzy_search_repository
-            .fuzzy_search(needle, haystack, search_all)
-            .await
-    }
-}
-
-#[async_trait::async_trait]
-impl<F: GrpcInfra + Send + Sync> TextPatchRepository for ForgeRepo<F> {
-    async fn build_text_patch(
-        &self,
-        haystack: &str,
-        old_string: &str,
-        new_string: &str,
-    ) -> anyhow::Result<TextPatchBlock> {
-        let request = tonic::Request::new(crate::proto_generated::BuildTextPatchRequest {
-            haystack: haystack.to_string(),
-            old_string: old_string.to_string(),
-            new_string: new_string.to_string(),
-        });
-
-        let channel = self.infra.channel()?;
-        let mut client =
-            crate::proto_generated::forge_service_client::ForgeServiceClient::new(channel);
-        let response = client.build_text_patch(request).await?.into_inner();
-
-        Ok(TextPatchBlock { patch: response.patch, patched_text: response.patched_text })
     }
 }
 

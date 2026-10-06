@@ -175,13 +175,6 @@
       "default": 0,
       "minimum": 0
     },
-    "max_sem_search_results": {
-      "description": "Maximum number of candidate results returned from the initial semantic\nsearch vector query.",
-      "type": "integer",
-      "format": "uint",
-      "default": 0,
-      "minimum": 0
-    },
     "max_stdout_line_chars": {
       "description": "Maximum number of characters per line in shell command output.",
       "type": "integer",
@@ -272,15 +265,8 @@
         }
       ]
     },
-    "sem_search_top_k": {
-      "description": "Number of top results retained after re-ranking in semantic search.",
-      "type": "integer",
-      "format": "uint",
-      "default": 0,
-      "minimum": 0
-    },
     "services_url": {
-      "description": "Base URL of the Forge services API used for semantic search and\nindexing.",
+      "description": "Base URL of the Forge services API used for workspace indexing.",
       "type": "string",
       "default": ""
     },
@@ -367,11 +353,6 @@
     },
     "use_forge_committer": {
       "description": "Whether `forge commit` should override `GIT_COMMITTER_NAME` and\n`GIT_COMMITTER_EMAIL` with the Forge identity. Defaults to `true` via\nthe embedded `.forge.toml` defaults.",
-      "type": "boolean",
-      "default": false
-    },
-    "use_text_patch_fallback": {
-      "description": "Switches patch replacement fallback from the legacy fuzzy-search range\nlookup to the newer text-patch gRPC API.\nDefaults to `false` so patching continues to use the legacy fallback\nbehavior unless explicitly enabled in `forge.toml`.",
       "type": "boolean",
       "default": false
     },

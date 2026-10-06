@@ -31,6 +31,14 @@ pub struct PatchOutput {
     pub before: String,
     pub after: String,
     pub content_hash: String,
+    /// Number of edits in the call.
+    pub edits: usize,
+    /// Replacement count: occurrences for `replace_all` edits, one otherwise.
+    pub replacements: usize,
+    /// Number of edits that matched only after normalisation.
+    pub fuzzy_edits: usize,
+    /// Whether the call used the batch (`edits`) form.
+    pub batch: bool,
 }
 
 #[derive(Debug, Setters)]
@@ -356,20 +364,24 @@ pub trait PlanCreateService: Send + Sync {
 
 #[async_trait::async_trait]
 pub trait FsPatchService: Send + Sync {
-    /// Patches a file at the specified path with the given content.
+    /// Applies `edits` in order to the file at `path`, all-or-nothing, and
+    /// writes the result once.
+    ///
+    /// # Arguments
+    /// * `path` - Absolute path of the file.
+    /// * `edits` - Replacements applied in order, each seeing the previous
+    ///   result.
+    /// * `batch` - Whether the call used the `edits` form; errors then name
+    ///   the failing edit index.
+    ///
+    /// # Errors
+    /// Returns an error when an edit does not match, matches ambiguously, or
+    /// the file cannot be read or written.
     async fn patch(
         &self,
         path: String,
-        search: String,
-        content: String,
-        replace_all: bool,
-    ) -> anyhow::Result<PatchOutput>;
-
-    /// Applies multiple patches to a single file in sequence
-    async fn multi_patch(
-        &self,
-        path: String,
         edits: Vec<forge_domain::PatchEdit>,
+        batch: bool,
     ) -> anyhow::Result<PatchOutput>;
 }
 
@@ -409,17 +421,6 @@ pub trait FsSearchService: Send + Sync {
     /// * `Ok(None)` - No matches found
     /// * `Err(_)` - Search error
     async fn search(&self, params: forge_domain::FSSearch) -> anyhow::Result<Option<SearchResult>>;
-}
-
-#[async_trait::async_trait]
-pub trait FollowUpService: Send + Sync {
-    /// Follows up on a tool call with the given context.
-    async fn follow_up(
-        &self,
-        question: String,
-        options: Vec<String>,
-        multiple: Option<bool>,
-    ) -> anyhow::Result<Option<String>>;
 }
 
 #[async_trait::async_trait]
@@ -556,7 +557,6 @@ pub trait Services: Send + Sync + 'static + Clone + EnvironmentInfra {
     type ImageReadService: ImageReadService;
     type FsRemoveService: FsRemoveService;
     type FsSearchService: FsSearchService;
-    type FollowUpService: FollowUpService;
     type FsUndoService: FsUndoService;
     type NetFetchService: NetFetchService;
     type ShellService: ShellService;
@@ -583,7 +583,6 @@ pub trait Services: Send + Sync + 'static + Clone + EnvironmentInfra {
     fn image_read_service(&self) -> &Self::ImageReadService;
     fn fs_remove_service(&self) -> &Self::FsRemoveService;
     fn fs_search_service(&self) -> &Self::FsSearchService;
-    fn follow_up_service(&self) -> &Self::FollowUpService;
     fn fs_undo_service(&self) -> &Self::FsUndoService;
     fn net_fetch_service(&self) -> &Self::NetFetchService;
     fn shell_service(&self) -> &Self::ShellService;
@@ -782,21 +781,10 @@ impl<I: Services> FsPatchService for I {
     async fn patch(
         &self,
         path: String,
-        search: String,
-        content: String,
-        replace_all: bool,
-    ) -> anyhow::Result<PatchOutput> {
-        self.fs_patch_service()
-            .patch(path, search, content, replace_all)
-            .await
-    }
-
-    async fn multi_patch(
-        &self,
-        path: String,
         edits: Vec<forge_domain::PatchEdit>,
+        batch: bool,
     ) -> anyhow::Result<PatchOutput> {
-        self.fs_patch_service().multi_patch(path, edits).await
+        self.fs_patch_service().patch(path, edits, batch).await
     }
 }
 
@@ -831,20 +819,6 @@ impl<I: Services> FsRemoveService for I {
 impl<I: Services> FsSearchService for I {
     async fn search(&self, params: forge_domain::FSSearch) -> anyhow::Result<Option<SearchResult>> {
         self.fs_search_service().search(params).await
-    }
-}
-
-#[async_trait::async_trait]
-impl<I: Services> FollowUpService for I {
-    async fn follow_up(
-        &self,
-        question: String,
-        options: Vec<String>,
-        multiple: Option<bool>,
-    ) -> anyhow::Result<Option<String>> {
-        self.follow_up_service()
-            .follow_up(question, options, multiple)
-            .await
     }
 }
 

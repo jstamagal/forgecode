@@ -5,7 +5,6 @@ description: "DEEP RESEARCH ONLY. Use for deep research tasks only—when the us
 reasoning:
   enabled: true
 tools:
-  - sem_search
   - search
   - read
   - fetch

@@ -63,38 +63,6 @@ async fn test_rendered_user_message() {
 }
 
 #[tokio::test]
-async fn test_followup_does_not_trigger_session_summary() {
-    let followup_call = ToolCallFull::new("followup")
-        .arguments(json!({"question": "Do you need more information?"}));
-    let followup_result =
-        ToolResult::new("followup").output(Ok(ToolOutput::text("Follow-up question sent")));
-
-    let mut ctx = TestContext::default()
-        .mock_tool_call_responses(vec![(followup_call.clone(), followup_result)])
-        .mock_assistant_responses(vec![
-            ChatCompletionMessage::assistant("I need more information")
-                .tool_calls(vec![followup_call.into()]),
-            ChatCompletionMessage::assistant("Waiting for response")
-                .finish_reason(FinishReason::Stop),
-        ]);
-
-    ctx.run("Ask a follow-up question").await.unwrap();
-
-    let has_chat_complete = ctx
-        .output
-        .chat_responses
-        .iter()
-        .flatten()
-        .any(|response| matches!(response, ChatResponse::TaskComplete));
-
-    assert!(!ctx.output.tools().is_empty(), "Context should've tools.");
-    assert!(
-        !has_chat_complete,
-        "Should NOT have TaskComplete response for followup"
-    );
-}
-
-#[tokio::test]
 async fn test_empty_responses() {
     let mut ctx = TestContext::default().mock_assistant_responses(vec![
         // Empty response 1

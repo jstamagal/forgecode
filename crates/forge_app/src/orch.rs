@@ -331,12 +331,7 @@ impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orc
             is_complete =
                 message.finish_reason == Some(FinishReason::Stop) && message.tool_calls.is_empty();
 
-            // Should yield if a tool is asking for a follow-up
-            should_yield = is_complete
-                || message
-                    .tool_calls
-                    .iter()
-                    .any(|call| ToolCatalog::should_yield(&call.name));
+            should_yield = is_complete;
 
             // Process tool calls and update context
             let mut tool_call_records = self

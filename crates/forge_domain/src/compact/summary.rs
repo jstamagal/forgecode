@@ -5,8 +5,8 @@ use derive_more::From;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Context, ContextMessage, Role, SearchQuery, TextMessage, Todo, ToolCallFull, ToolCallId,
-    ToolCatalog, ToolResult,
+    Context, ContextMessage, Role, TextMessage, Todo, ToolCallFull, ToolCallId, ToolCatalog,
+    ToolResult,
 };
 
 /// A simplified summary of a context, focusing on messages and their tool calls
@@ -116,16 +116,6 @@ impl SummaryToolCall {
         }
     }
 
-    /// Creates a CodebaseSearch tool call with default values (id: None,
-    /// is_success: true)
-    pub fn codebase_search(queries: Vec<SearchQuery>) -> Self {
-        Self {
-            id: None,
-            tool: SummaryTool::SemSearch { queries },
-            is_success: true,
-        }
-    }
-
     /// Creates an Undo tool call with default values (id: None, is_success:
     /// true)
     pub fn undo(path: impl Into<String>) -> Self {
@@ -142,16 +132,6 @@ impl SummaryToolCall {
         Self {
             id: None,
             tool: SummaryTool::Fetch { url: url.into() },
-            is_success: true,
-        }
-    }
-
-    /// Creates a Followup tool call with default values (id: None, is_success:
-    /// true)
-    pub fn followup(question: impl Into<String>) -> Self {
-        Self {
-            id: None,
-            tool: SummaryTool::Followup { question: question.into() },
             is_success: true,
         }
     }
@@ -185,10 +165,8 @@ pub enum SummaryTool {
     FileRemove { path: String },
     Shell { command: String },
     Search { pattern: String },
-    SemSearch { queries: Vec<SearchQuery> },
     Undo { path: String },
     Fetch { url: String },
-    Followup { question: String },
     Plan { plan_name: String },
     Skill { name: String },
     Task { agent_id: String },
@@ -343,9 +321,6 @@ fn extract_tool_info(call: &ToolCallFull, current_todos: &[Todo]) -> Option<Summ
             ToolCatalog::Read(input) => Some(SummaryTool::FileRead { path: input.file_path }),
             ToolCatalog::Write(input) => Some(SummaryTool::FileUpdate { path: input.file_path }),
             ToolCatalog::Patch(input) => Some(SummaryTool::FileUpdate { path: input.file_path }),
-            ToolCatalog::MultiPatch(input) => {
-                Some(SummaryTool::FileUpdate { path: input.file_path })
-            }
             ToolCatalog::Remove(input) => Some(SummaryTool::FileRemove { path: input.path }),
             ToolCatalog::Shell(input) => Some(SummaryTool::Shell { command: input.command }),
             ToolCatalog::FsSearch(input) => {
@@ -353,14 +328,8 @@ fn extract_tool_info(call: &ToolCallFull, current_todos: &[Todo]) -> Option<Summ
                 let pattern = input.glob.or(input.file_type).unwrap_or(input.pattern);
                 Some(SummaryTool::Search { pattern })
             }
-            ToolCatalog::SemSearch(input) => {
-                Some(SummaryTool::SemSearch { queries: input.queries })
-            }
             ToolCatalog::Undo(input) => Some(SummaryTool::Undo { path: input.path }),
             ToolCatalog::Fetch(input) => Some(SummaryTool::Fetch { url: input.url }),
-            ToolCatalog::Followup(input) => {
-                Some(SummaryTool::Followup { question: input.question })
-            }
             ToolCatalog::Plan(input) => Some(SummaryTool::Plan { plan_name: input.plan_name }),
             ToolCatalog::Skill(input) => Some(SummaryTool::Skill { name: input.name }),
             ToolCatalog::TodoWrite(input) => {
@@ -1049,38 +1018,6 @@ mod tests {
     }
 
     #[test]
-    fn test_context_summary_extracts_codebase_search_tool_calls() {
-        let fixture = context(vec![assistant_with_tools(
-            "Searching codebase",
-            vec![
-                ToolCatalog::tool_call_semantic_search(vec![SearchQuery::new(
-                    "retry mechanism",
-                    "find retry logic",
-                )])
-                .call_id("call_1"),
-            ],
-        )]);
-
-        let actual = ContextSummary::from(&fixture);
-
-        let expected = ContextSummary::new(vec![SummaryBlock::new(
-            Role::Assistant,
-            vec![
-                Block::content("Searching codebase"),
-                SummaryToolCall::codebase_search(vec![SearchQuery::new(
-                    "retry mechanism",
-                    "find retry logic",
-                )])
-                .id("call_1")
-                .is_success(false)
-                .into(),
-            ],
-        )]);
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
     fn test_context_summary_links_search_results_to_calls() {
         let fixture = context(vec![
             assistant_with_tools(
@@ -1170,19 +1107,6 @@ mod tests {
     }
 
     #[test]
-    fn test_summary_message_block_followup_helper() {
-        let actual: SummaryMessage = SummaryToolCall::followup("What should I do next?").into();
-
-        let expected = Block::ToolCall(SummaryToolCall {
-            id: None,
-            tool: SummaryTool::Followup { question: "What should I do next?".to_string() },
-            is_success: true,
-        });
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
     fn test_summary_message_block_plan_helper() {
         let actual: SummaryMessage = SummaryToolCall::plan("feature-implementation").into();
 
@@ -1232,29 +1156,6 @@ mod tests {
             vec![
                 Block::content("Fetching data"),
                 SummaryToolCall::fetch("https://api.example.com")
-                    .id("call_1")
-                    .is_success(false)
-                    .into(),
-            ],
-        )]);
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn test_context_summary_extracts_followup_tool_calls() {
-        let fixture = context(vec![assistant_with_tools(
-            "Asking question",
-            vec![ToolCatalog::tool_call_followup("Should I proceed?").call_id("call_1")],
-        )]);
-
-        let actual = ContextSummary::from(&fixture);
-
-        let expected = ContextSummary::new(vec![SummaryBlock::new(
-            Role::Assistant,
-            vec![
-                Block::content("Asking question"),
-                SummaryToolCall::followup("Should I proceed?")
                     .id("call_1")
                     .is_success(false)
                     .into(),
@@ -1336,29 +1237,6 @@ mod tests {
     }
 
     #[test]
-    fn test_context_summary_links_followup_results_to_calls() {
-        let fixture = context(vec![
-            assistant_with_tools(
-                "Asking",
-                vec![ToolCatalog::tool_call_followup("Continue?").call_id("call_1")],
-            ),
-            tool_result("followup", "call_1", false),
-        ]);
-
-        let actual = ContextSummary::from(&fixture);
-
-        let expected = ContextSummary::new(vec![SummaryBlock::new(
-            Role::Assistant,
-            vec![
-                Block::content("Asking"),
-                SummaryToolCall::followup("Continue?").id("call_1").into(),
-            ],
-        )]);
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
     fn test_context_summary_links_plan_results_to_calls() {
         let fixture = context(vec![
             assistant_with_tools(
@@ -1393,7 +1271,6 @@ mod tests {
                 ToolCatalog::tool_call_search("/test", "/test/src").call_id("call_5"),
                 ToolCatalog::tool_call_undo("/test/undo.txt").call_id("call_6"),
                 ToolCatalog::tool_call_fetch("https://example.com").call_id("call_7"),
-                ToolCatalog::tool_call_followup("Proceed?").call_id("call_8"),
                 ToolCatalog::tool_call_plan("implementation", "v1", "test").call_id("call_9"),
             ],
         )]);
@@ -1430,10 +1307,6 @@ mod tests {
                     .into(),
                 SummaryToolCall::fetch("https://example.com")
                     .id("call_7")
-                    .is_success(false)
-                    .into(),
-                SummaryToolCall::followup("Proceed?")
-                    .id("call_8")
                     .is_success(false)
                     .into(),
                 SummaryToolCall::plan("implementation")

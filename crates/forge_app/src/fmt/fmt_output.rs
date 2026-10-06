@@ -24,13 +24,6 @@ impl FormatContent for ToolOperation {
                     .diff()
                     .to_string(),
             )),
-            ToolOperation::FsMultiPatch { input: _, output } => {
-                Some(ChatResponseContent::ToolOutput(
-                    DiffFormat::format(&output.before, &output.after)
-                        .diff()
-                        .to_string(),
-                ))
-            }
             ToolOperation::PlanCreate { input: _, output } => Some({
                 let title = TitleFormat::debug(format!(
                     "Create {}",
@@ -47,11 +40,9 @@ impl FormatContent for ToolOperation {
             ToolOperation::FsRead { input: _, output: _ }
             | ToolOperation::FsRemove { input: _, output: _ }
             | ToolOperation::FsSearch { input: _, output: _ }
-            | ToolOperation::CodebaseSearch { output: _ }
             | ToolOperation::FsUndo { input: _, output: _ }
             | ToolOperation::NetFetch { input: _, output: _ }
             | ToolOperation::Shell { output: _ }
-            | ToolOperation::FollowUp { output: _ }
             | ToolOperation::Skill { output: _ } => None,
         }
     }
@@ -300,17 +291,20 @@ mod tests {
     fn test_fs_patch_success() {
         let after_content = "Hello universe\nThis is a test\nNew line";
         let fixture = ToolOperation::FsPatch {
-            input: forge_domain::FSPatch {
-                file_path: "/home/user/project/test.txt".to_string(),
-                old_string: "Hello world".to_string(),
-                new_string: "Hello universe".to_string(),
-                replace_all: false,
-            },
+            input: forge_domain::FSPatch::new(
+                "/home/user/project/test.txt",
+                "Hello world",
+                "Hello universe",
+            ),
             output: PatchOutput {
                 errors: vec![],
                 before: "Hello world\nThis is a test".to_string(),
                 after: after_content.to_string(),
                 content_hash: crate::compute_hash(after_content),
+                edits: 1,
+                replacements: 1,
+                fuzzy_edits: 0,
+                batch: false,
             },
         };
         let env = fixture_environment();
@@ -323,12 +317,11 @@ mod tests {
     fn test_fs_patch_with_warning() {
         let after_content = "line1\nnew line\nline2";
         let fixture = ToolOperation::FsPatch {
-            input: forge_domain::FSPatch {
-                file_path: "/home/user/project/large_file.txt".to_string(),
-                old_string: "line2".to_string(),
-                new_string: "new line\nline2".to_string(),
-                replace_all: false,
-            },
+            input: forge_domain::FSPatch::new(
+                "/home/user/project/large_file.txt",
+                "line2",
+                "new line\nline2",
+            ),
             output: PatchOutput {
                 errors: vec![forge_domain::SyntaxError {
                     line: 10,
@@ -338,6 +331,10 @@ mod tests {
                 before: "line1\nline2".to_string(),
                 after: after_content.to_string(),
                 content_hash: crate::compute_hash(after_content),
+                edits: 1,
+                replacements: 1,
+                fuzzy_edits: 0,
+                batch: false,
             },
         };
         let env = fixture_environment();
@@ -470,30 +467,6 @@ mod tests {
                 description: None,
             },
         };
-        let env = fixture_environment();
-
-        let actual = fixture.to_content(&env);
-        let expected = None;
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn test_follow_up_with_response() {
-        let fixture = ToolOperation::FollowUp {
-            output: Some("Yes, continue with the operation".to_string()),
-        };
-        let env = fixture_environment();
-
-        let actual = fixture.to_content(&env);
-        let expected = None;
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn test_follow_up_no_response() {
-        let fixture = ToolOperation::FollowUp { output: None };
         let env = fixture_environment();
 
         let actual = fixture.to_content(&env);
