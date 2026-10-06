@@ -776,3 +776,82 @@ async fn test_truncated_tool_arguments_run_nothing() {
         "{assistant_texts:?}"
     );
 }
+
+/// T24 end to end: a lazy tool is refused with the exact load call until it
+/// is loaded, and published (and callable) from the next request on.
+#[tokio::test]
+async fn test_lazy_tool_is_published_after_load() {
+    use forge_domain::{
+        SharedSurface, SurfaceData, SurfaceTool, ToolCallId, ToolDefinition, ToolMode, ToolSource,
+    };
+    let tool = |name: &str, mode| SurfaceTool {
+        definition: ToolDefinition::new(name),
+        mode,
+        source: ToolSource::Native,
+    };
+    let surface = SharedSurface::new(SurfaceData {
+        tools: vec![
+            tool("fs_read", ToolMode::Eager),
+            tool("lsp", ToolMode::Lazy),
+            tool(forge_domain::TOOL_DISCOVERY, ToolMode::Eager),
+        ],
+        ..Default::default()
+    });
+    let call = |name: &str, id: &str, args: serde_json::Value| {
+        ToolCallFull::new(name)
+            .call_id(ToolCallId::new(id))
+            .arguments(ToolCallArguments::from(args))
+    };
+    let early = call("lsp", "1", json!({}));
+    let load = call(
+        forge_domain::TOOL_DISCOVERY,
+        "2",
+        json!({"load": "native:lsp"}),
+    );
+    let late = call("lsp", "3", json!({}));
+    let ok = |c: &ToolCallFull, text: &str| {
+        ToolResult::new(c.name.clone())
+            .call_id(c.call_id.clone().unwrap())
+            .output(Ok(ToolOutput::text(text)))
+    };
+
+    let mut ctx = TestContext::default()
+        .surface(surface)
+        .mock_tool_call_responses(vec![
+            (
+                load.clone(),
+                ok(&load, r#"{"id":"native:lsp","loaded":["lsp"]}"#),
+            ),
+            (late.clone(), ok(&late, "diagnostics: none")),
+        ])
+        .mock_assistant_responses(vec![
+            ChatCompletionMessage::assistant("Try").tool_calls(vec![early.into()]),
+            ChatCompletionMessage::assistant("Load").tool_calls(vec![load.into()]),
+            ChatCompletionMessage::assistant("Use").tool_calls(vec![late.into()]),
+            ChatCompletionMessage::assistant("Done").finish_reason(FinishReason::Stop),
+        ]);
+
+    ctx.run("Check diagnostics").await.unwrap();
+
+    let results = recorded_results(&ctx);
+    let published_last: Vec<String> = ctx
+        .output
+        .conversation_history
+        .last()
+        .and_then(|c| c.context.as_ref())
+        .map(|c| c.tools.iter().map(|t| t.name.to_string()).collect())
+        .unwrap_or_default();
+    assert!(results[0].2, "{results:?}");
+    assert!(
+        results[0]
+            .1
+            .contains("tool_discovery {\"load\":\"native:lsp\"}"),
+        "{}",
+        results[0].1
+    );
+    assert_eq!(
+        results[2],
+        ("3".to_string(), "diagnostics: none".to_string(), false)
+    );
+    assert_eq!(published_last, vec!["fs_read", "lsp", "tool_discovery"]);
+}

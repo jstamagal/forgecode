@@ -19,7 +19,6 @@ use crate::services::{AgentRegistry, CustomInstructionsService, ProviderAuthServ
 use crate::set_conversation_id::SetConversationId;
 use crate::system_prompt::SystemPrompt;
 use crate::tool_registry::ToolRegistry;
-use crate::tool_resolver::ToolResolver;
 use crate::user_prompt::UserPromptGenerator;
 use crate::{
     AgentExt, AgentProviderResolver, ConversationService, EnvironmentInfra, FileDiscoveryService,
@@ -121,15 +120,20 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ForgeAp
             .refresh_provider_credential(agent_provider)
             .await?;
 
+        let provider_id = agent_provider.id.to_string();
         let models = services.models(agent_provider).await?;
         let selected_model = models.iter().find(|model| model.id == agent.model);
         let agent = agent.compaction_threshold(selected_model);
 
-        // Get system and mcp tool definitions and resolve them for the agent
-        let all_tool_definitions = self.tool_registry.list().await?;
-        let tool_resolver = ToolResolver::new(all_tool_definitions);
-        let tool_definitions: Vec<ToolDefinition> =
-            tool_resolver.resolve(&agent).into_iter().cloned().collect();
+        // T24: the agent's tool surface for this request (eager tools, lazy
+        // catalog, skills, MCP status rows); tools loaded earlier in the
+        // conversation are published again.
+        let (surface, aliases) = self
+            .tool_registry
+            .request_surface(&agent, selected_model.cloned(), &provider_id)
+            .await?;
+        let surface_state = conversation.metrics.surface.snapshot();
+        let tool_definitions: Vec<ToolDefinition> = surface.published(&surface_state);
         let max_tool_failure_per_turn = agent.max_tool_failure_per_turn.unwrap_or(3);
 
         let current_time = Local::now();
@@ -143,6 +147,7 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ForgeAp
                 .files(files.clone())
                 .max_extensions(forge_config.max_extensions)
                 .template_config(build_template_config(&forge_config))
+                .aliases(aliases.clone())
                 .add_system_message(conversation)
                 .await?;
 
@@ -165,8 +170,11 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ForgeAp
         let conversation = add_task_notes(conversation, &agent);
 
         let conversation = InitConversationMetrics::new(current_time).apply(conversation);
-        let conversation = ApplyTunableParameters::new(agent.clone(), tool_definitions.clone())
-            .apply(conversation);
+        let conversation = ApplyTunableParameters::new(
+            agent.clone(),
+            crate::tool_surface::apply_aliases(tool_definitions.clone(), &aliases),
+        )
+        .apply(conversation);
         let conversation = SetConversationId.apply(conversation);
 
         // Create the orchestrator with all necessary dependencies
@@ -206,7 +214,9 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ForgeAp
         .tool_definitions(tool_definitions)
         .models(models)
         .hook(Arc::new(hook))
-        .task_depth(chat.task_depth);
+        .task_depth(chat.task_depth)
+        .surface(surface)
+        .aliases(aliases);
 
         // Create and return the stream
         let stream = MpscStream::spawn(

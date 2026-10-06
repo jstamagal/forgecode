@@ -1,33 +1,46 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use convert_case::{Case, Casing};
-use forge_api::{ToolName, ToolsOverview};
+use forge_api::{Selection, ToolName, ToolsOverview};
 
 use crate::info::Info;
 
-/// Formats the tools overview for display using the Info component,
-/// organized by categories with availability checkboxes.
-pub fn format_tools(agent_tools: &[ToolName], overview: &ToolsOverview) -> Info {
+/// Formats the tools overview for display: each tool with the mode the
+/// agent's `tools:` chain gives it (eager, lazy, ban, or `-` when no entry
+/// names it) and the entry that decided it, then any warnings about entries
+/// that name no tool (X21).
+pub fn format_tools(selection: &Selection, overview: &ToolsOverview) -> Info {
     let mut info = Info::new();
-    let agent_tools = agent_tools.iter().collect::<HashSet<_>>();
-    let checkbox = |tool_name: &ToolName| -> &str {
-        if agent_tools.contains(tool_name) {
-            "[✓]"
-        } else {
-            "[ ]"
+    let decided: HashMap<&ToolName, (&str, String)> = selection
+        .decisions
+        .iter()
+        .map(|d| {
+            let mode = d
+                .mode
+                .map(|m| m.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            let by = d.decided_by.as_deref().unwrap_or("");
+            (&d.tool, (by, mode))
+        })
+        .collect();
+    let row = |tool_name: &ToolName| -> String {
+        match decided.get(tool_name) {
+            Some((by, mode)) if !by.is_empty() => format!("[{mode:<5}] {tool_name}  ({by})"),
+            Some((_, mode)) => format!("[{mode:<5}] {tool_name}"),
+            None => format!("[-    ] {tool_name}"),
         }
     };
 
     // System tools section
     info = info.add_title("SYSTEM");
     for tool in &overview.system {
-        info = info.add_value(format!("{} {}", checkbox(&tool.name), tool.name));
+        info = info.add_value(row(&tool.name));
     }
 
     // Agents section
     info = info.add_title("AGENTS");
     for tool in &overview.agents {
-        info = info.add_value(format!("{} {}", checkbox(&tool.name), tool.name));
+        info = info.add_value(row(&tool.name));
     }
 
     // MCP tools section
@@ -37,7 +50,7 @@ pub fn format_tools(agent_tools: &[ToolName], overview: &ToolsOverview) -> Info 
             info = info.add_title(title);
 
             for tool in tools {
-                info = info.add_value(format!("{} {}", checkbox(&tool.name), tool.name));
+                info = info.add_value(row(&tool.name));
             }
         }
     }
@@ -53,7 +66,44 @@ pub fn format_tools(agent_tools: &[ToolName], overview: &ToolsOverview) -> Info 
         }
     }
 
+    if !selection.warnings.is_empty() {
+        info = info.add_title("WARNINGS");
+        for warning in &selection.warnings {
+            info = info.add_value(warning.clone());
+        }
+    }
+
     info
+}
+
+/// X26: description and schema bytes per tool, with an approximate token
+/// count (4 bytes per token) and totals.
+pub fn format_tool_costs(tools: &[forge_api::ToolDefinition]) -> Info {
+    let mut info = Info::new().add_title("TOOL COST (bytes: description + schema ≈ tokens)");
+    let mut total = 0usize;
+    for tool in tools {
+        let description = tool.description.len();
+        let schema = serde_json::to_string(&tool.input_schema)
+            .map(|s| s.len())
+            .unwrap_or_default();
+        total += description + schema;
+        info = info.add_key_value(
+            tool.name.to_string(),
+            format!(
+                "{description} + {schema} = {} (≈{} tokens)",
+                description + schema,
+                (description + schema).div_ceil(4)
+            ),
+        );
+    }
+    info.add_key_value(
+        "TOTAL",
+        format!(
+            "{total} bytes (≈{} tokens) over {} tools",
+            total.div_ceil(4),
+            tools.len()
+        ),
+    )
 }
 
 /// Truncates an error message to at most 80 characters for display.

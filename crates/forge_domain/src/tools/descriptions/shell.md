@@ -4,7 +4,7 @@ Long output comes back as its head and its tail, with a marker between them nami
 
     [truncated: output budget (… bytes) reached; stdout bytes 25000-980000 of 1004000 (955000 bytes) are not shown; the whole stdout is at /path/shell-3-….log — read it on with range {"start_byte": 25000}]
 
-Read any part of that file with `{{tool_names.read}}` and a byte range, so do not pipe through `head` or `tail` just to shrink the output. Stdin is `/dev/null` and there is no terminal: a command that reads input gets end-of-file, and a password or confirmation prompt gets no answer.
+Read any part of that file{{#if tool_names.read}} with `{{tool_names.read}}` and a byte range{{/if}}, so do not pipe through `head` or `tail` just to shrink the output. Stdin is `/dev/null` and there is no terminal: a command that reads input gets end-of-file, and a password or confirmation prompt gets no answer.
 
 A command does not have to finish before you get an answer. The call waits `timeout` seconds (default 30); a command that finishes inside that window comes back whole, and one still running comes back as a handle with whatever it has printed so far:
 
@@ -16,8 +16,18 @@ The command is never killed by the wait. Then `action="poll", handle="3"` return
 The command gets a filtered environment: the configured allow-list (by default PATH, HOME, USER, LANG, LC_ALL, TERM, PWD, SHELL) plus the names you list in `env`. When the command references a variable that was filtered out, the result says so.
 
 - Independent commands can go in parallel calls in one response; chain dependent ones with `&&` in one call.
+{{#if tool_names.fs_search}}
 - Search with `{{tool_names.fs_search}}`, not `grep`, `rg`, or `find`.
+{{/if}}
+{{#if tool_names.read}}
 - Read files with `{{tool_names.read}}`, not `cat`, `head`, or `tail`.
+{{/if}}
+{{#if tool_names.patch}}
 - Edit files with `{{tool_names.patch}}`, not `sed` or `awk`.
+{{/if}}
+{{#if tool_names.write}}
 - Write files with `{{tool_names.write}}`, not redirects or heredocs.
+{{/if}}
+{{#if tool_names.remove}}
 - Delete with `{{tool_names.remove}}`, not `rm`.
+{{/if}}

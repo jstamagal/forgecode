@@ -56,6 +56,134 @@ pub enum ToolCatalog {
     TodoRead(TodoRead),
     #[serde(alias = "Task")]
     Task(TaskInput),
+    ToolDiscovery(ToolDiscovery),
+    #[from(ignore)]
+    McpResourceList(McpServerArg),
+    #[from(ignore)]
+    McpResourceTemplates(McpServerArg),
+    #[from(ignore)]
+    McpResourceRead(McpResourceArg),
+    #[from(ignore)]
+    McpResourceSubscribe(McpResourceArg),
+    #[from(ignore)]
+    McpResourceUnsubscribe(McpResourceArg),
+    #[from(ignore)]
+    McpPromptList(McpServerArg),
+    McpPromptGet(McpPromptArg),
+}
+
+/// Input for MCP controls that act on a whole server (M3).
+#[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct McpServerArg {
+    /// Exact MCP server name (from a `tool_discovery` mcp status row).
+    pub server: String,
+}
+
+/// Input for MCP controls that act on one resource (M3).
+#[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct McpResourceArg {
+    /// Exact MCP server name (from a `tool_discovery` mcp status row).
+    pub server: String,
+    /// Exact resource URI, as returned by `mcp_resource_list` or
+    /// `mcp_resource_templates`.
+    pub uri: String,
+}
+
+/// Input for `mcp_prompt_get` (M3).
+#[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct McpPromptArg {
+    /// Exact MCP server name (from a `tool_discovery` mcp status row).
+    pub server: String,
+    /// Exact prompt name, as returned by `mcp_prompt_list`.
+    pub name: String,
+    /// Prompt arguments, name to string value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<std::collections::BTreeMap<String, String>>,
+}
+
+/// Shared setup sentence of the MCP control descriptions.
+const MCP_CONTROL_SETUP: &str = " Before using it, run tool_discovery with kind=\"mcp\" (or an MCP server name as source) to connect the servers, then pass the exact server name of an mcp status row.";
+
+impl ToolCatalog {
+    /// Descriptions of the MCP controls (M3), which have no description
+    /// file of their own.
+    fn mcp_control_description(&self) -> Option<String> {
+        let (what, extra) = match self {
+            ToolCatalog::McpResourceList(_) => ("List the resources of an MCP server.", ""),
+            ToolCatalog::McpResourceTemplates(_) => {
+                ("List the resource templates of an MCP server.", "")
+            }
+            ToolCatalog::McpResourceRead(_) => (
+                "Read an MCP resource by URI.",
+                " Copy an exact URI from mcp_resource_list or mcp_resource_templates.",
+            ),
+            ToolCatalog::McpResourceSubscribe(_) => (
+                "Subscribe to update notifications for an MCP resource.",
+                " Copy an exact URI from mcp_resource_list.",
+            ),
+            ToolCatalog::McpResourceUnsubscribe(_) => (
+                "Stop update notifications for an MCP resource.",
+                " Copy an exact URI from mcp_resource_list.",
+            ),
+            ToolCatalog::McpPromptList(_) => ("List the prompts of an MCP server.", ""),
+            ToolCatalog::McpPromptGet(_) => (
+                "Get an MCP prompt and its messages.",
+                " Copy an exact prompt name from mcp_prompt_list.",
+            ),
+            _ => return None,
+        };
+        Some(format!(
+            "{what}{MCP_CONTROL_SETUP}{extra} Configured secrets are redacted from the result."
+        ))
+    }
+}
+
+/// Input for `tool_discovery`: search the catalog of loadable tools and
+/// skills, or load one by id.
+#[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
+#[tool_description_file = "crates/forge_domain/src/tools/descriptions/tool_discovery.md"]
+pub struct ToolDiscovery {
+    /// Intent or words to search for; empty returns a compact index.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub query: String,
+
+    /// Catalog id to load, such as `native:lsp`, `mcp:github__list_issues`
+    /// or `skill:review`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load: Option<String>,
+
+    /// Only rows of this kind: native, mcp or skill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<DiscoveryKind>,
+
+    /// Only rows with exactly this source (an MCP server name, `native`, or
+    /// a skill source).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+
+    /// Continue a truncated result at its `next_offset`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u32>,
+}
+
+/// Catalog kind filter for `tool_discovery`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, AsRefStr, EnumIter)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum DiscoveryKind {
+    Native,
+    Mcp,
+    Skill,
+}
+
+impl JsonSchema for DiscoveryKind {
+    fn schema_name() -> Cow<'static, str> {
+        <Self as SimpleEnumSchema>::simple_enum_schema_name()
+    }
+
+    fn json_schema(r#gen: &mut schemars::generate::SchemaGenerator) -> Schema {
+        <Self as SimpleEnumSchema>::simple_enum_schema(r#gen)
+    }
 }
 
 /// Input structure for agent tool calls. This serves as the generic schema
@@ -882,6 +1010,14 @@ impl ToolDescription for ToolCatalog {
             ToolCatalog::TodoWrite(v) => v.description(),
             ToolCatalog::TodoRead(v) => v.description(),
             ToolCatalog::Task(v) => v.description(),
+            ToolCatalog::ToolDiscovery(v) => v.description(),
+            ToolCatalog::McpResourceList(_)
+            | ToolCatalog::McpResourceTemplates(_)
+            | ToolCatalog::McpResourceRead(_)
+            | ToolCatalog::McpResourceSubscribe(_)
+            | ToolCatalog::McpResourceUnsubscribe(_)
+            | ToolCatalog::McpPromptList(_)
+            | ToolCatalog::McpPromptGet(_) => self.mcp_control_description().unwrap_or_default(),
         }
     }
 }
@@ -955,6 +1091,16 @@ impl ToolCatalog {
             ToolCatalog::Task(_) => r#gen.into_root_schema_for::<TaskInput>(),
             ToolCatalog::TodoWrite(_) => r#gen.into_root_schema_for::<TodoWrite>(),
             ToolCatalog::TodoRead(_) => r#gen.into_root_schema_for::<TodoRead>(),
+            ToolCatalog::ToolDiscovery(_) => r#gen.into_root_schema_for::<ToolDiscovery>(),
+            ToolCatalog::McpResourceList(_)
+            | ToolCatalog::McpResourceTemplates(_)
+            | ToolCatalog::McpPromptList(_) => r#gen.into_root_schema_for::<McpServerArg>(),
+            ToolCatalog::McpResourceRead(_)
+            | ToolCatalog::McpResourceSubscribe(_)
+            | ToolCatalog::McpResourceUnsubscribe(_) => {
+                r#gen.into_root_schema_for::<McpResourceArg>()
+            }
+            ToolCatalog::McpPromptGet(_) => r#gen.into_root_schema_for::<McpPromptArg>(),
         };
 
         // Apply transform to add nullable property and remove null from type
@@ -1009,7 +1155,12 @@ impl ToolCatalog {
             ToolCatalog::Read(_)
             | ToolCatalog::FsSearch(_)
             | ToolCatalog::Skill(_)
-            | ToolCatalog::TodoRead(_) => true,
+            | ToolCatalog::TodoRead(_)
+            | ToolCatalog::McpResourceList(_)
+            | ToolCatalog::McpResourceTemplates(_)
+            | ToolCatalog::McpResourceRead(_)
+            | ToolCatalog::McpPromptList(_)
+            | ToolCatalog::McpPromptGet(_) => true,
             _ => false,
         }
     }
@@ -1019,7 +1170,16 @@ impl ToolCatalog {
     pub fn has_own_timeout(&self) -> bool {
         matches!(
             self,
-            ToolCatalog::Task(_) | ToolCatalog::Shell(_) | ToolCatalog::Fetch(_)
+            ToolCatalog::Task(_)
+                | ToolCatalog::Shell(_)
+                | ToolCatalog::Fetch(_)
+                | ToolCatalog::McpResourceList(_)
+                | ToolCatalog::McpResourceTemplates(_)
+                | ToolCatalog::McpResourceRead(_)
+                | ToolCatalog::McpResourceSubscribe(_)
+                | ToolCatalog::McpResourceUnsubscribe(_)
+                | ToolCatalog::McpPromptList(_)
+                | ToolCatalog::McpPromptGet(_)
         )
     }
 
@@ -1129,6 +1289,14 @@ impl ToolCatalog {
             | ToolCatalog::Skill(_)
             | ToolCatalog::TodoWrite(_)
             | ToolCatalog::TodoRead(_)
+            | ToolCatalog::ToolDiscovery(_)
+            | ToolCatalog::McpResourceList(_)
+            | ToolCatalog::McpResourceTemplates(_)
+            | ToolCatalog::McpResourceRead(_)
+            | ToolCatalog::McpResourceSubscribe(_)
+            | ToolCatalog::McpResourceUnsubscribe(_)
+            | ToolCatalog::McpPromptList(_)
+            | ToolCatalog::McpPromptGet(_)
             | ToolCatalog::Task(_) => None,
         }
     }

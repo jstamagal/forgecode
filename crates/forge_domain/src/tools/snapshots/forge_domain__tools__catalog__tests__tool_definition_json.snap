@@ -559,3 +559,168 @@ expression: tools
   },
   "additionalProperties": false
 }
+{
+  "description": "Input for `tool_discovery`: search the catalog of loadable tools and\nskills, or load one by id.",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "description": "Only rows of this kind: native, mcp or skill.",
+      "type": "string",
+      "enum": [
+        "native",
+        "mcp",
+        "skill",
+        null
+      ],
+      "nullable": true
+    },
+    "load": {
+      "description": "Catalog id to load, such as `native:lsp`, `mcp:github__list_issues`\nor `skill:review`.",
+      "type": "string",
+      "nullable": true
+    },
+    "offset": {
+      "description": "Continue a truncated result at its `next_offset`.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0,
+      "nullable": true
+    },
+    "query": {
+      "description": "Intent or words to search for; empty returns a compact index.",
+      "type": "string"
+    },
+    "source": {
+      "description": "Only rows with exactly this source (an MCP server name, `native`, or\na skill source).",
+      "type": "string",
+      "nullable": true
+    }
+  },
+  "additionalProperties": false
+}
+{
+  "description": "Input for MCP controls that act on a whole server (M3).",
+  "type": "object",
+  "properties": {
+    "server": {
+      "description": "Exact MCP server name (from a `tool_discovery` mcp status row).",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "server"
+  ]
+}
+{
+  "description": "Input for MCP controls that act on a whole server (M3).",
+  "type": "object",
+  "properties": {
+    "server": {
+      "description": "Exact MCP server name (from a `tool_discovery` mcp status row).",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "server"
+  ]
+}
+{
+  "description": "Input for MCP controls that act on one resource (M3).",
+  "type": "object",
+  "properties": {
+    "server": {
+      "description": "Exact MCP server name (from a `tool_discovery` mcp status row).",
+      "type": "string"
+    },
+    "uri": {
+      "description": "Exact resource URI, as returned by `mcp_resource_list` or\n`mcp_resource_templates`.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "server",
+    "uri"
+  ]
+}
+{
+  "description": "Input for MCP controls that act on one resource (M3).",
+  "type": "object",
+  "properties": {
+    "server": {
+      "description": "Exact MCP server name (from a `tool_discovery` mcp status row).",
+      "type": "string"
+    },
+    "uri": {
+      "description": "Exact resource URI, as returned by `mcp_resource_list` or\n`mcp_resource_templates`.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "server",
+    "uri"
+  ]
+}
+{
+  "description": "Input for MCP controls that act on one resource (M3).",
+  "type": "object",
+  "properties": {
+    "server": {
+      "description": "Exact MCP server name (from a `tool_discovery` mcp status row).",
+      "type": "string"
+    },
+    "uri": {
+      "description": "Exact resource URI, as returned by `mcp_resource_list` or\n`mcp_resource_templates`.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "server",
+    "uri"
+  ]
+}
+{
+  "description": "Input for MCP controls that act on a whole server (M3).",
+  "type": "object",
+  "properties": {
+    "server": {
+      "description": "Exact MCP server name (from a `tool_discovery` mcp status row).",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "server"
+  ]
+}
+{
+  "description": "Input for `mcp_prompt_get` (M3).",
+  "type": "object",
+  "properties": {
+    "arguments": {
+      "description": "Prompt arguments, name to string value.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "nullable": true
+    },
+    "name": {
+      "description": "Exact prompt name, as returned by `mcp_prompt_list`.",
+      "type": "string"
+    },
+    "server": {
+      "description": "Exact MCP server name (from a `tool_discovery` mcp status row).",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "server",
+    "name"
+  ]
+}

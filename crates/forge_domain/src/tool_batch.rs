@@ -134,15 +134,32 @@ fn match_ratio(a: &str, b: &str) -> f64 {
     2.0 * table[a.len()][b.len()] as f64 / (a.len() + b.len()) as f64
 }
 
+/// What a name the request does not publish is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Absent {
+    /// No tool has this name.
+    Unknown,
+    /// A real tool this agent may not use.
+    Blocked,
+    /// A tool this agent may load; the catalog id to load.
+    NotLoaded(String),
+}
+
 /// The error for a call to a tool this request does not offer.
 ///
 /// # Arguments
 /// * `name` - The name the model called.
 /// * `surface` - Names of the tools on this request.
-/// * `known` - Whether the name is a real tool this agent may not use.
-pub fn unavailable_message(name: &str, surface: &[&str], known: bool) -> String {
-    if known {
-        return format!("{name} is not allowed by this agent's tool policy.");
+/// * `absent` - Why the name is not on the request.
+pub fn unavailable_message(name: &str, surface: &[&str], absent: &Absent) -> String {
+    match absent {
+        Absent::Blocked => return format!("{name} is not allowed by this agent's tool policy."),
+        Absent::NotLoaded(id) => {
+            return format!(
+                "{name} is not in the published tool set for this call. Fix: tool_discovery {{\"load\":\"{id}\"}} then re-issue the call on the next model call. Retrying unchanged will fail again."
+            );
+        }
+        Absent::Unknown => {}
     }
     let mut message = format!("unknown tool {name}.");
     if let Some(closest) = closest_tool_name(name, surface.iter().copied()) {
@@ -459,12 +476,12 @@ fn canonicalize_aliases(tool: &str, mut value: Value) -> Value {
 /// * `surface` - Tool definitions the request offered (name → schema).
 /// * `resolve` - Maps a called name to the canonical surface name (case,
 ///   aliases, MCP name forms); `None` when nothing matches.
-/// * `known` - Whether a name is a real tool this agent may not use.
+/// * `absent` - Why a name the request does not publish is absent.
 pub fn normalize_batch(
     calls: &[ToolCallFull],
     surface: &[ToolDefinition],
     resolve: impl Fn(&ToolName) -> Option<ToolName>,
-    known: impl Fn(&ToolName) -> bool,
+    absent: impl Fn(&ToolName) -> Absent,
 ) -> NormalizedBatch {
     let names: Vec<&str> = surface.iter().map(|tool| tool.name.as_str()).collect();
     let mut seen: HashSet<(String, String)> = HashSet::new();
@@ -501,7 +518,7 @@ pub fn normalize_batch(
             rejection = Some(CallRejection::Unavailable(unavailable_message(
                 call.name.as_str(),
                 &names,
-                known(&call.name),
+                &absent(&call.name),
             )));
         }
         if rejection.is_none()
@@ -594,7 +611,7 @@ mod tests {
             call("read", r#"{ "file_path" : "/a" }"#, "2"),
             call("Read", r#"{"file_path":"/b"}"#, "3"),
         ];
-        let actual = normalize_batch(&fixture, &surface(), resolve, |_| false);
+        let actual = normalize_batch(&fixture, &surface(), resolve, |_| Absent::Unknown);
         let ids: Vec<String> = actual
             .calls
             .iter()
@@ -609,7 +626,7 @@ mod tests {
     #[test]
     fn test_unknown_argument_named_in_one_line() {
         let fixture = vec![call("read", r#"{"file_path":"/a","bogus":1}"#, "1")];
-        let actual = normalize_batch(&fixture, &surface(), resolve, |_| false);
+        let actual = normalize_batch(&fixture, &surface(), resolve, |_| Absent::Unknown);
         let expected = Some(CallRejection::InvalidArguments(
             "invalid arguments for read: unknown argument bogus; allowed: file_path, range, show_line_numbers".to_string(),
         ));
@@ -622,7 +639,7 @@ mod tests {
             call("raed", r#"{}"#, "1"),
             call("functions_read", r#"{}"#, "2"),
         ];
-        let actual = normalize_batch(&fixture, &surface(), resolve, |_| false);
+        let actual = normalize_batch(&fixture, &surface(), resolve, |_| Absent::Unknown);
         let messages: Vec<String> = actual
             .calls
             .iter()
@@ -642,9 +659,22 @@ mod tests {
 
     #[test]
     fn test_policy_blocked_is_distinct_from_unknown() {
-        let actual = unavailable_message("shell", &["read"], true);
+        let actual = unavailable_message("shell", &["read"], &Absent::Blocked);
         let expected = "shell is not allowed by this agent's tool policy.";
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_lazy_tool_not_loaded_names_the_load_call() {
+        let fixture = vec![call("lsp", r#"{}"#, "1")];
+        let actual = normalize_batch(&fixture, &surface(), resolve, |_| {
+            Absent::NotLoaded("native:lsp".to_string())
+        });
+        let expected = "lsp is not in the published tool set for this call. Fix: tool_discovery {\"load\":\"native:lsp\"} then re-issue the call on the next model call. Retrying unchanged will fail again.";
+        assert_eq!(
+            actual.calls[0].rejection.as_ref().unwrap().message(),
+            expected
+        );
     }
 
     #[test]
@@ -654,7 +684,7 @@ mod tests {
             r#"{"file_path":"/a","edits":"[{\"old_string\":\"x\",\"new_string\":\"y\"}]"}"#,
             "1",
         )];
-        let actual = normalize_batch(&fixture, &surface(), resolve, |_| false);
+        let actual = normalize_batch(&fixture, &surface(), resolve, |_| Absent::Unknown);
         assert_eq!(actual.calls[0].rejection, None);
         let ToolCallArguments::Parsed(args) = &actual.calls[0].call.arguments else {
             panic!("expected parsed arguments")
@@ -676,7 +706,7 @@ mod tests {
                 )
             })
             .collect();
-        let actual = normalize_batch(&fixture, &surface(), resolve, |_| false);
+        let actual = normalize_batch(&fixture, &surface(), resolve, |_| Absent::Unknown);
         assert_eq!((actual.calls.len(), actual.capped), (50, 5));
         assert!(
             actual

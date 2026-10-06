@@ -878,6 +878,8 @@ pub(super) struct MetricsRecord {
     files_accessed: std::collections::HashSet<String>,
     #[serde(default)]
     reads: forge_domain::SharedLedger,
+    #[serde(default)]
+    surface: forge_domain::SharedSurfaceState,
 }
 
 impl From<&forge_domain::Metrics> for MetricsRecord {
@@ -896,6 +898,7 @@ impl From<&forge_domain::Metrics> for MetricsRecord {
                 .collect(),
             files_accessed: metrics.files_accessed.clone(),
             reads: metrics.reads.clone(),
+            surface: metrics.surface.clone(),
         }
     }
 }
@@ -941,6 +944,7 @@ impl From<MetricsRecord> for forge_domain::Metrics {
             files_accessed,
             todos: Vec::new(),
             reads: record.reads,
+            surface: record.surface,
         }
     }
 }

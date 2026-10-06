@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::reader::ConfigReader;
 use crate::writer::ConfigWriter;
 use crate::{
-    AutoDumpFormat, Compact, Decimal, HttpConfig, ModelConfig, ReasoningConfig, RetryConfig, Update,
+    AutoDumpFormat, Compact, Decimal, HttpConfig, McpSettings, ModelConfig, ReasoningConfig,
+    RetryConfig, ToolAliasProfile, Update,
 };
 
 /// Wire protocol a provider uses for chat completions.
@@ -142,6 +143,13 @@ pub struct ForgeConfig {
     /// run on their agent's configured model.
     #[serde(default)]
     pub lock_subagent_model: bool,
+    /// Model-facing tool names for matching models (X23); the first profile
+    /// whose `match` hits the model or provider id applies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_alias_profiles: Vec<ToolAliasProfile>,
+    /// MCP settings (per-agent server/tool policy).
+    #[serde(default)]
+    pub mcp: McpSettings,
     /// Maximum number of lines read from a file in a single operation.
     #[serde(default)]
     pub max_read_lines: u64,

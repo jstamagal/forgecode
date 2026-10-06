@@ -14,7 +14,7 @@ Read one file: text, PDF, image, or notebook. Relative paths resolve against the
 - A Jupyter notebook (.ipynb) read without a range comes back as its cells, each with its id, type, source and a summary of its outputs; a line or byte range reads its raw JSON.
 - A PDF comes back as extracted text (via `pdftotext`).
 - Directories, pipes and other special files are refused; use `fs_search` to find files.
-- Reading records which lines you have seen: `patch` and an overwriting `write` require a prior read of the file, and `patch` requires that every line it changes was shown.
+- Reading records which lines you have seen. An overwriting `write` requires a prior read of the file. `patch` requires a prior read and that every line it changes was shown.
 - You can call multiple tools in a single response; read several files in parallel when you need them.
 
 ---
@@ -22,12 +22,13 @@ Read one file: text, PDF, image, or notebook. Relative paths resolve against the
 ### write
 
 Create a file, or replace one whole. Missing parent directories are created.
-- Replacing an existing file needs `overwrite=true` and a prior `read` of the file in this conversation; one page is enough, the whole file is not needed. Without `overwrite=true` an existing file is refused.
+- Replacing an existing file needs `overwrite=true` and a prior read of the file in this conversation (`read`); one page is enough, the whole file is not needed. Without `overwrite=true` an existing file is refused.
 - If the file changed on disk since that read, the overwrite is refused and nothing is written; the error names both hashes and shows the diff from what you read to what is there now, and a retry after it goes through.
 - The file keeps its existing line-ending style (LF, CRLF or CR); a new file gets LF.
 - The previous state is snapshotted first, so `undo` brings it back (undoing a create deletes the file).
 - After the write the file is parsed locally and syntax errors the write introduced are reported as a warning.
-- Edit existing files with `patch`; use this only for new files or a deliberate full rewrite. Do not create documentation files unless asked.
+- Edit existing files with `patch`; use this only for new files or a deliberate full rewrite.
+- Do not create documentation files unless asked.
 
 ---
 
@@ -40,7 +41,9 @@ Search file contents by regex. `output_mode` is `files_with_matches` (paths, the
 - Results are absolute paths in path order. Bytes that are not valid UTF-8 are shown as `\xNN`.
 - The walk stays on the filesystem `path` is on and does not enter mount points below it; name a mounted share as `path` to search it. A search is bounded at 120 seconds.
 - `head_limit` and `offset` page through a large result; the result names the next `offset` when there are more. A result too large to show inline is written to a file whose path the result names.
-- Use `read` to see a file once a search has found it, and `task` for open-ended investigations that need several rounds of search and reading.
+- Use `read` to see a file once a search has found it.
+- Use `task` for open-ended investigations that need several rounds of search and reading.
+
 
 ---
 
@@ -51,7 +54,7 @@ Search code structurally with ast-grep (in-process, tree-sitter grammars). Patte
 - The language is inferred from each file's extension; set `language` to restrict the search to one language. Under `language="c"` a bare call pattern like `call($A)` matches nothing, because tree-sitter-c parses that fragment as a type; write it as an expression statement (`call($A);`).
 - Matches come back as an absolute `path:line` heading, the numbered source lines (`12|code`), and the metavariable captures. When more matches exist than `max_results` (default 200), the extra ones are dropped and the result says so.
 - The walk skips paths ignored by `.gitignore` and hidden paths.
-- Rewrites are two-step: `rewrite` alone is a dry run that shows a unified diff and changes nothing; `apply=true` writes it and is refused when there are more matches than `max_results`. An applied rewrite snapshots every changed file for `undo`.
+- Rewrites are two-step: `rewrite` alone is a dry run that shows a unified diff and changes nothing; `apply=true` writes it and is refused when there are more matches than `max_results`. An applied rewrite snapshots every changed file first, so `undo` brings each back.
 
 ---
 
@@ -72,11 +75,12 @@ Replace exact text in one file.
 - One call is one `undo` step.
 - Use `write` for new files or a deliberate full rewrite.
 
+
 ---
 
 ### undo
 
-Restore one path to its latest snapshot. Every tool that changes a file (`write`, `patch`, `remove`) snapshots it first; one `patch` call, even with several edits, is one snapshot.
+Restore one path to its latest snapshot. Every tool that changes a file snapshots it first; one `patch` call, even with several edits, is one snapshot.
 - Restores file contents and permission modes, symlink targets, whole directory trees, and absence: undoing the creation of a file deletes it. Ownership, timestamps and extended attributes are not restored.
 - Each successful restore pops one snapshot, so repeated calls walk further back. A filesystem error keeps the snapshot for a retry. An unusable snapshot is discarded with an error without changing the path; call again to reach an older entry.
 - Snapshots belong to this conversation and survive a restart of it; the store keeps the newest 100 entries (64 MiB). This is not git and does not touch repository history.
@@ -85,7 +89,7 @@ Restore one path to its latest snapshot. Every tool that changes a file (`write`
 
 ### shell
 
-Run one command with `km96Dbi7kkOng` and return its exit code, stdout and stderr. Under bash and zsh a pipeline fails when any stage fails (`pipefail`), so `false | cat` reports exit 1. The working directory is `cwd`, default `/home/user/project`; set `cwd` instead of using `cd`.
+Run one command with `/bin/bash` and return its exit code, stdout and stderr. Under bash and zsh a pipeline fails when any stage fails (`pipefail`), so `false | cat` reports exit 1. The working directory is `cwd`, default `/home/user/project`; set `cwd` instead of using `cd`.
 
 Long output comes back as its head and its tail, with a marker between them naming the bytes left out and the file that holds the whole stream:
 
@@ -109,13 +113,14 @@ The command gets a filtered environment: the configured allow-list (by default P
 - Write files with `write`, not redirects or heredocs.
 - Delete with `remove`, not `rm`.
 
+
 ---
 
 ### fetch
 
 Fetch a URL over HTTP(S) or `file://`.
 
-HTML comes back as markdown with links made absolute, so you can fetch them as-is; `raw=true` returns the source instead. `method`, `headers`, `body` and `json_body` make any HTTP request (a GET that saves nothing checks robots.txt first). `save` streams the body to that path instead of returning it, with no size limit; a partial download left by an interrupted save resumes with a Range request, and the previous file at that path can be brought back with `undo`. Binary responses come back as a short descriptor naming the type and size; pass `save` to get the bytes. Images come back as images when the model accepts image input. Unsaved responses are read up to 32 MiB and bounded by a 30-second timeout; a large text result is written to a file whose path and continuation range the result names.
+HTML comes back as markdown with links made absolute, so you can fetch them as-is; `raw=true` returns the source instead. `method`, `headers`, `body` and `json_body` make any HTTP request (a GET that saves nothing checks robots.txt first). `save` streams the body to that path instead of returning it, with no size limit; a partial download left by an interrupted save resumes with a Range request, and the previous file at that path is snapshotted first (`undo` brings it back). Binary responses come back as a short descriptor naming the type and size; pass `save` to get the bytes. Images come back as images when the model accepts image input. Unsaved responses are read up to 32 MiB and bounded by a 30-second timeout; a large text result is written to a file whose path and continuation range the result names.
 
 ---
 
@@ -357,7 +362,7 @@ Available agents and their tools:
   - Tools: read, fs_search, fetch
 
 When to use: open-ended searches that need several search/read rounds, independent investigations that can run concurrently, work that suits another agent's persona and tools.
-When not to use: reading one known file or two or three files (use `read`), searching for an exact identifier or definition (use `fs_search`), anything one or two direct tool calls finish.
+When not to use: anything one or two direct tool calls finish, such as reading one known file or two or three files (use `read`), or searching for an exact identifier or definition (use `fs_search`).
 
 Inputs:
 - `tasks` (required to start workers): one self-contained prompt per worker. A fresh worker cannot see this conversation; include paths, error text, constraints, the expected output shape, and whether it may change code.
@@ -373,3 +378,54 @@ Background: a call blocks until every worker finishes. With `background=true` it
     HANDLE t1 RUNNING
 
 `action="poll", handle="t1"` says whether it is still running and returns the result once done; `action="wait", handle="t1", timeout=N` blocks up to N seconds, or until the end without `timeout`; `action="kill", handle="t1"` stops it. `handle` defaults to your most recent running task, and you see only tasks this conversation started. The finished result is also written to the file the handle names, and if you have not polled it by your next turn, a reminder names that file. Use background runs for slow, independent work you do not need before your next step.
+
+---
+
+### tool_discovery
+
+Search the catalog of tools and skills this agent may load but does not have yet, or load one by its id.
+- An empty `query` returns a compact index (ids, names, sources; capped at 4 KiB). A search ranks rows by BM25 over names, descriptions and parameter names and adds short descriptions (capped at 8 KiB). `kind` (native, mcp, skill) and an exact `source` narrow the rows. When `truncated` is true, repeat the call with `offset` set to `next_offset`.
+- `load` takes the exact `id` of a row whose `loadable` is true. Loading a tool publishes its full schema from the next model call on, for the rest of this conversation. Loading a skill returns its instructions and loads the tools it declares that this agent may use. Searching with `kind="mcp"` or an MCP server's name as `source` connects to those servers first; a server that is not connected yet or failed to connect appears as a status row, which is not loadable.
+- Load first, then call the tool in a later response: a tool is not callable in the same response that loads it. Calling a tool that is not loaded returns an error naming the exact load call.
+
+---
+
+### mcp_resource_list
+
+List the resources of an MCP server. Before using it, run tool_discovery with kind="mcp" (or an MCP server name as source) to connect the servers, then pass the exact server name of an mcp status row. Configured secrets are redacted from the result.
+
+---
+
+### mcp_resource_templates
+
+List the resource templates of an MCP server. Before using it, run tool_discovery with kind="mcp" (or an MCP server name as source) to connect the servers, then pass the exact server name of an mcp status row. Configured secrets are redacted from the result.
+
+---
+
+### mcp_resource_read
+
+Read an MCP resource by URI. Before using it, run tool_discovery with kind="mcp" (or an MCP server name as source) to connect the servers, then pass the exact server name of an mcp status row. Copy an exact URI from mcp_resource_list or mcp_resource_templates. Configured secrets are redacted from the result.
+
+---
+
+### mcp_resource_subscribe
+
+Subscribe to update notifications for an MCP resource. Before using it, run tool_discovery with kind="mcp" (or an MCP server name as source) to connect the servers, then pass the exact server name of an mcp status row. Copy an exact URI from mcp_resource_list. Configured secrets are redacted from the result.
+
+---
+
+### mcp_resource_unsubscribe
+
+Stop update notifications for an MCP resource. Before using it, run tool_discovery with kind="mcp" (or an MCP server name as source) to connect the servers, then pass the exact server name of an mcp status row. Copy an exact URI from mcp_resource_list. Configured secrets are redacted from the result.
+
+---
+
+### mcp_prompt_list
+
+List the prompts of an MCP server. Before using it, run tool_discovery with kind="mcp" (or an MCP server name as source) to connect the servers, then pass the exact server name of an mcp status row. Configured secrets are redacted from the result.
+
+---
+
+### mcp_prompt_get
+
+Get an MCP prompt and its messages. Before using it, run tool_discovery with kind="mcp" (or an MCP server name as source) to connect the servers, then pass the exact server name of an mcp status row. Copy an exact prompt name from mcp_prompt_list. Configured secrets are redacted from the result.

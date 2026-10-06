@@ -7,7 +7,7 @@ Available agents and their tools:
 {{/each}}
 
 When to use: open-ended searches that need several search/read rounds, independent investigations that can run concurrently, work that suits another agent's persona and tools.
-When not to use: reading one known file or two or three files (use `{{tool_names.read}}`), searching for an exact identifier or definition (use `{{tool_names.fs_search}}`), anything one or two direct tool calls finish.
+When not to use: anything one or two direct tool calls finish{{#if tool_names.read}}, such as reading one known file or two or three files (use `{{tool_names.read}}`){{/if}}{{#if tool_names.fs_search}}, or searching for an exact identifier or definition (use `{{tool_names.fs_search}}`){{/if}}.
 
 Inputs:
 - `tasks` (required to start workers): one self-contained prompt per worker. A fresh worker cannot see this conversation; include paths, error text, constraints, the expected output shape, and whether it may change code.

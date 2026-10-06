@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,8 +23,8 @@ use crate::mcp_executor::McpExecutor;
 use crate::task_jobs::TaskJobs;
 use crate::tool_executor::ToolExecutor;
 use crate::{
-    AgentRegistry, ConversationService, EnvironmentInfra, McpService, PolicyService,
-    ProviderService, Services, ToolResolver,
+    AgentRegistry, ConversationService, EnvironmentInfra, McpConfigManager, McpService,
+    PolicyService, ProviderService, Services, SkillFetchService,
 };
 
 /// Background task runs live as long as the process: the registry is rebuilt
@@ -172,7 +173,7 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ToolReg
         input: ToolCallFull,
         context: &ToolCallContext,
     ) -> anyhow::Result<ToolOutput> {
-        Self::validate_tool_call(agent, &input.name)?;
+        Self::validate_tool_call(agent, &input.name, context)?;
 
         tracing::info!(tool_name = %input.name, arguments = %input.arguments.clone().into_string(), "Executing tool call");
         let tool_name = input.name.clone();
@@ -184,6 +185,10 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ToolReg
             // Special handling for Task tool - delegate to AgentExecutor
             if let ToolCatalog::Task(task_input) = tool_input {
                 return self.run_task(task_input, context).await;
+            }
+            // tool_discovery works on the request's surface.
+            if let ToolCatalog::ToolDiscovery(discovery) = tool_input {
+                return self.run_discovery(agent, discovery, context).await;
             }
 
             let env = self.services.get_environment();
@@ -271,6 +276,213 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ToolReg
             Ok(output)
         } else {
             Err(Error::NotFound(input.name).into())
+        }
+    }
+
+    /// T24: the `tool_discovery` tool. Searches the request's catalog or
+    /// loads one id; loading changes the conversation's surface state, which
+    /// the orchestrator publishes from the next model call.
+    async fn run_discovery(
+        &self,
+        agent: &Agent,
+        input: forge_domain::ToolDiscovery,
+        context: &ToolCallContext,
+    ) -> anyhow::Result<ToolOutput> {
+        use forge_domain::{DiscoveryKind, EntryKind, catalog_page};
+
+        let surface = context.surface().clone();
+        let state = context.surface_state()?;
+
+        if let Some(id) = input
+            .load
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            return self.load_catalog_id(id, &surface, &state).await;
+        }
+
+        // A search scoped to MCP (kind or a server name as source) connects
+        // the agent's servers first, so their tools become catalog rows.
+        let wants_mcp = matches!(input.kind, Some(DiscoveryKind::Mcp))
+            || input.source.as_deref().is_some_and(|source| {
+                surface.with(|d| d.status_rows.iter().any(|r| r.source == source))
+            });
+        if wants_mcp {
+            self.connect_mcp_into_surface(agent, &surface, input.source.as_deref())
+                .await;
+        }
+
+        let kind = input.kind.map(|kind| match kind {
+            DiscoveryKind::Native => EntryKind::Native,
+            DiscoveryKind::Mcp => EntryKind::Mcp,
+            DiscoveryKind::Skill => EntryKind::Skill,
+        });
+        let rows: Vec<forge_domain::CatalogEntry> = surface
+            .catalog()
+            .into_iter()
+            .filter(|row| kind.is_none_or(|k| row.kind == k))
+            .filter(|row| {
+                input
+                    .source
+                    .as_deref()
+                    .is_none_or(|source| row.source.eq_ignore_ascii_case(source))
+            })
+            .collect();
+        let page = catalog_page(
+            &rows,
+            &input.query,
+            &state.snapshot(),
+            input.offset.unwrap_or(0) as usize,
+        );
+        Ok(ToolOutput::text(page))
+    }
+
+    /// Loads one catalog id: a lazy tool (published from the next call) or a
+    /// skill (instructions returned, its declared tools loaded where policy
+    /// allows).
+    async fn load_catalog_id(
+        &self,
+        id: &str,
+        surface: &forge_domain::SharedSurface,
+        state: &forge_domain::SharedSurfaceState,
+    ) -> anyhow::Result<ToolOutput> {
+        if let Some(name) = id.strip_prefix("skill:") {
+            let known = surface.with(|d| d.skills.iter().any(|row| row.id == id));
+            if !known {
+                anyhow::bail!("no allowed catalog entry with id {id:?}");
+            }
+            let skill = self.services.fetch_skill(name.to_string()).await?;
+            let mut loaded = Vec::new();
+            let mut denied = Vec::new();
+            for tool in &skill.tools {
+                let tool_id = surface.with(|d| {
+                    d.tools
+                        .iter()
+                        .find(|t| t.definition.name.as_str() == tool)
+                        .map(|t| (t.catalog_id(), t.mode))
+                });
+                match tool_id {
+                    Some((tool_id, forge_domain::ToolMode::Lazy)) => {
+                        state.with(|s| s.loaded.insert(tool_id));
+                        loaded.push(tool.clone());
+                    }
+                    Some((_, _)) => loaded.push(tool.clone()),
+                    None => denied.push(tool.clone()),
+                }
+            }
+            state.with(|s| {
+                s.loaded.insert(id.to_string());
+                s.offered_skills.insert(name.to_string());
+            });
+            let mut result = serde_json::json!({
+                "id": id,
+                "instructions": skill.command,
+                "loaded": loaded,
+            });
+            if !denied.is_empty() {
+                result["denied_tools"] = serde_json::json!(denied);
+            }
+            return Ok(ToolOutput::text(result.to_string()));
+        }
+        let found = surface.with(|d| {
+            d.tools
+                .iter()
+                .find(|t| t.mode == forge_domain::ToolMode::Lazy && t.catalog_id() == id)
+                .map(|t| t.definition.name.to_string())
+        });
+        match found {
+            Some(name) => {
+                state.with(|s| s.loaded.insert(id.to_string()));
+                Ok(ToolOutput::text(
+                    serde_json::json!({"id": id, "loaded": [name]}).to_string(),
+                ))
+            }
+            None => {
+                let status = surface.with(|d| d.status_rows.iter().any(|r| r.id == id));
+                if status {
+                    anyhow::bail!("{id} is a status row, not a loadable tool");
+                }
+                anyhow::bail!("no allowed catalog entry with id {id:?}")
+            }
+        }
+    }
+
+    /// M2: connects the MCP servers this agent may use (all, or the one
+    /// named by `source`) and adds their tools to the surface as lazy
+    /// catalog rows; failures become status rows with secrets redacted.
+    async fn connect_mcp_into_surface(
+        &self,
+        agent: &Agent,
+        surface: &forge_domain::SharedSurface,
+        source: Option<&str>,
+    ) {
+        let config = self.services.get_config().unwrap_or_default();
+        let servers = match self.services.get_mcp_servers().await {
+            Ok(servers) => servers,
+            Err(error) => {
+                surface.set_status(
+                    "mcp",
+                    forge_domain::CatalogEntry {
+                        id: "mcp:server-error:all".to_string(),
+                        name: "mcp".to_string(),
+                        kind: forge_domain::EntryKind::Mcp,
+                        source: "mcp".to_string(),
+                        description: format!("MCP servers could not be listed: {error:#}"),
+                        search_text: String::new(),
+                        loadable: false,
+                    },
+                );
+                return;
+            }
+        };
+        let policy = config.mcp.agents.get(agent.id.as_str());
+        for (server, tools) in servers.get_servers() {
+            let server = server.to_string();
+            let scoped_out = source.is_some_and(|s| !s.eq_ignore_ascii_case(&server));
+            let denied = policy.is_some_and(|p| !p.servers.permits(&server));
+            if scoped_out || denied {
+                continue;
+            }
+            let tools: Vec<forge_domain::SurfaceTool> = tools
+                .iter()
+                .filter(|tool| {
+                    config
+                        .mcp
+                        .permits(agent.id.as_str(), &server, tool.name.as_str())
+                })
+                .filter(|tool| {
+                    surface.with(|d| {
+                        !d.tools.iter().any(|t| {
+                            t.definition.name == tool.name && t.mode != forge_domain::ToolMode::Lazy
+                        })
+                    })
+                })
+                .map(|tool| forge_domain::SurfaceTool {
+                    definition: tool.clone(),
+                    mode: forge_domain::ToolMode::Lazy,
+                    source: forge_domain::ToolSource::Mcp(server.clone()),
+                })
+                .collect();
+            surface.add_tools(tools, &server);
+        }
+        for (server, error) in servers.get_failures() {
+            let server = server.to_string();
+            if source.is_some_and(|s| !s.eq_ignore_ascii_case(&server)) {
+                continue;
+            }
+            surface.set_status(
+                &server,
+                forge_domain::CatalogEntry {
+                    id: format!("mcp:server-error:{server}"),
+                    name: server.clone(),
+                    kind: forge_domain::EntryKind::Mcp,
+                    source: server.clone(),
+                    description: forge_domain::summary(&format!("MCP server error: {error}")),
+                    search_text: String::new(),
+                    loadable: false,
+                },
+            );
         }
     }
 
@@ -414,12 +626,83 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ToolReg
             Some(id) => context.clone().with_call_id(id.as_str()),
             None => context.clone(),
         };
+        let path = Self::touched_path(&call);
         let output = self
             .call_inner(agent, call, &context)
             .await
             .map(|output| self.bound(output, &context));
+        // T21: the first time a file matching a skill's `paths` is read or
+        // edited, the result offers that skill once.
+        let output = match (output, path) {
+            (Ok(output), Some(path)) => Ok(match self.skill_offer(&path, &context) {
+                Some(offer) => output.combine(ToolOutput::text(offer)),
+                None => output,
+            }),
+            (output, _) => output,
+        };
 
         ToolResult::new(tool_name).call_id(call_id).output(output)
+    }
+
+    /// The file a read/write/patch call works on.
+    fn touched_path(call: &ToolCallFull) -> Option<String> {
+        match ToolCatalog::try_from(call.clone()).ok()? {
+            ToolCatalog::Read(input) => Some(input.file_path),
+            ToolCatalog::Write(input) => Some(input.file_path),
+            ToolCatalog::Patch(input) => Some(input.file_path),
+            _ => None,
+        }
+    }
+
+    /// A one-time `<system_reminder>` offering each skill whose `paths` match
+    /// `path` and that this conversation has not been offered or loaded.
+    fn skill_offer(&self, path: &str, context: &ToolCallContext) -> Option<String> {
+        let surface = context.surface();
+        let candidates = surface.with(|data| data.skill_paths.clone());
+        if candidates.is_empty() {
+            return None;
+        }
+        let cwd = self.services.get_environment().cwd;
+        let absolute = std::path::Path::new(path);
+        let relative = absolute
+            .strip_prefix(&cwd)
+            .unwrap_or(absolute)
+            .display()
+            .to_string();
+        let state = context.surface_state().ok()?;
+        let offers: Vec<String> = state.with(|state| {
+            let matched: Vec<String> = candidates
+                .into_iter()
+                .filter(|(name, _)| !state.offered_skills.contains(name))
+                .filter(|(_, globs)| {
+                    let mut skill = forge_domain::Skill::new("", "", "");
+                    skill.paths = globs.clone();
+                    skill.matches_path(&relative)
+                })
+                .map(|(name, _)| name)
+                .collect();
+            state.offered_skills.extend(matched.iter().cloned());
+            matched
+                .into_iter()
+                .filter(|name| !state.loaded.contains(&format!("skill:{name}")))
+                .collect()
+        });
+        if offers.is_empty() {
+            return None;
+        }
+        let lines: Vec<String> = offers
+            .iter()
+            .map(|name| {
+                format!(
+                    "Skill {name} applies to {relative}. Load it with tool_discovery {{\"load\":\"skill:{name}\"}}."
+                )
+            })
+            .collect();
+        Some(
+            Element::new("system_reminder")
+                .text(lines.join(" "))
+                .to_string(),
+        )
     }
 
     /// X11: spill/clip one result and narrow read coverage to what the model
@@ -449,10 +732,6 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ToolReg
             crate::result_bounds::narrow_read_coverage(&ledger, call_id, &original, delivered);
         }
         bounded
-    }
-
-    pub async fn list(&self) -> anyhow::Result<Vec<ToolDefinition>> {
-        Ok(self.tools_overview().await?.into())
     }
 
     /// Gets the model for the currently active agent by looking up the agent
@@ -508,6 +787,142 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ToolReg
             .agents(agent_tools)
             .mcp(mcp_tools))
     }
+
+    /// Builds the tool surface of one request for `agent` (T24, X1, X21,
+    /// X23, M2).
+    ///
+    /// MCP servers are not connected here unless the agent names MCP tools
+    /// `:eager`; otherwise each configured server is a status row that
+    /// `tool_discovery` connects on demand. Native descriptions are rendered
+    /// against the tools actually on the surface.
+    ///
+    /// # Errors
+    /// Returns an error when agents, skills or config cannot be loaded.
+    pub async fn request_surface(
+        &self,
+        agent: &Agent,
+        model: Option<Model>,
+        provider: &str,
+    ) -> anyhow::Result<(forge_domain::SharedSurface, forge_domain::AliasMap)> {
+        use crate::tool_surface as ts;
+
+        let config = self.services.get_config()?;
+        let agent_tools = self.agent_executor.agent_definitions().await?;
+        let wants_eager_mcp =
+            agent.tools.iter().flatten().any(|entry| {
+                entry.as_str().starts_with("mcp") && entry.as_str().ends_with(":eager")
+            });
+        let mcp = if wants_eager_mcp {
+            self.services.get_mcp_servers().await.unwrap_or_default()
+        } else {
+            forge_domain::McpServers::default()
+        };
+        let known = ts::known_tools(ts::native_definitions(), agent_tools, &mcp);
+        let mut tools = ts::resolve_surface(agent, &known);
+        if wants_eager_mcp {
+            let policy = config.mcp.agents.get(agent.id.as_str());
+            tools.retain(|tool| match &tool.source {
+                forge_domain::ToolSource::Mcp(server) => policy.is_none_or(|p| {
+                    p.servers.permits(server) && p.tools.permits(tool.definition.name.as_str())
+                }),
+                _ => true,
+            });
+        }
+        let on_surface: HashSet<String> = tools
+            .iter()
+            .map(|t| t.definition.name.to_string())
+            .collect();
+        let blocked = known
+            .iter()
+            .map(|t| t.definition.name.to_string())
+            .filter(|name| !on_surface.contains(name))
+            .collect();
+
+        let aliases = ts::resolve_alias_profile(
+            &config.tool_alias_profiles,
+            agent.model.as_str(),
+            provider,
+            &tools,
+        );
+        let mut agents = self.services.get_agents().await?;
+        if !config.research_subagent {
+            agents.retain(|a| a.id.as_str() != "sage" && a.id.as_str() != "agent");
+        }
+        agents.sort_by(|l, r| l.id.as_str().cmp(r.id.as_str()));
+        let data = SystemContext {
+            env: Some(self.services.get_environment()),
+            model,
+            tool_names: ts::tool_names_map(&tools, &aliases),
+            agents,
+            config: Some(TemplateConfig {
+                max_read_size: config.max_read_lines as usize,
+                max_read_bytes: config.max_read_bytes as usize,
+                max_image_size: config.max_image_size_bytes as usize,
+            }),
+            ..Default::default()
+        };
+        ts::render_native_descriptions(&mut tools, &data);
+
+        // Skills: catalog rows when the agent has `tool_discovery`.
+        let has_discovery = tools
+            .iter()
+            .any(|t| t.definition.name.as_str() == forge_domain::TOOL_DISCOVERY);
+        let skills = if has_discovery {
+            self.services.list_skills().await.unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        // MCP servers not connected yet are status rows the model can scope a
+        // discovery to.
+        let status_rows = if has_discovery && !wants_eager_mcp {
+            self.services
+                .read_mcp_config(None)
+                .await
+                .map(|cfg| {
+                    cfg.mcp_servers
+                        .iter()
+                        .filter(|(_, server)| !server.is_disabled())
+                        .filter(|(name, _)| {
+                            config
+                                .mcp
+                                .agents
+                                .get(agent.id.as_str())
+                                .is_none_or(|p| p.servers.permits(&name.to_string()))
+                        })
+                        .map(|(name, _)| forge_domain::CatalogEntry {
+                            id: format!("mcp:server:{name}"),
+                            name: name.to_string(),
+                            kind: forge_domain::EntryKind::Mcp,
+                            source: name.to_string(),
+                            description: format!(
+                                "MCP server {name} (not connected); search with kind=\"mcp\" or source=\"{name}\" to connect and list its tools."
+                            ),
+                            search_text: String::new(),
+                            loadable: false,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let surface = forge_domain::SharedSurface::new(forge_domain::SurfaceData {
+            tools,
+            status_rows,
+            skills: ts::skill_rows(&skills),
+            blocked,
+            skill_paths: skills
+                .iter()
+                .filter(|s| !s.paths.is_empty() && !s.disable_model_invocation)
+                .map(|s| (s.name.clone(), s.paths.clone()))
+                .collect(),
+            skill_tools: skills
+                .iter()
+                .map(|s| (s.name.clone(), s.tools.clone()))
+                .collect(),
+        });
+        Ok((surface, aliases))
+    }
 }
 
 impl<S> ToolRegistry<S> {
@@ -553,28 +968,76 @@ impl<S> ToolRegistry<S> {
             .collect::<Vec<_>>()
     }
 
-    /// Validates if a tool is supported by both the agent and the system.
+    /// Validates that `tool_name` is callable on this request: published by
+    /// the request's surface (eager, or lazy and loaded). A refusal
+    /// distinguishes a lazy tool that needs loading, a real tool this agent
+    /// may not use, and a name that does not exist (with a "did you mean"
+    /// suggestion); none counts toward the repeated-failure limit.
     ///
-    /// # Validation Process
-    /// Verifies the tool is supported by the agent specified in the context.
-    /// A refusal distinguishes a real tool this agent may not use from a name
-    /// that does not exist (with a "did you mean" suggestion); neither counts
-    /// toward the repeated-failure limit.
-    fn validate_tool_call(agent: &Agent, tool_name: &ToolName) -> anyhow::Result<()> {
-        // Check if tool matches any pattern (supports globs like "mcp_*")
-        let matches = ToolResolver::is_allowed(agent, tool_name);
-        if !matches {
-            tracing::error!(tool_name = %tool_name, "No tool with name");
-            let surface: Vec<&str> = agent
-                .tools
+    /// A context with no surface (an internal call outside a chat) falls
+    /// back to the agent's `tools:` entries.
+    fn validate_tool_call(
+        agent: &Agent,
+        tool_name: &ToolName,
+        context: &ToolCallContext,
+    ) -> anyhow::Result<()> {
+        let surface = context.surface();
+        let state = context.surface_state()?.snapshot();
+        let has_surface = surface.with(|data| !data.tools.is_empty());
+        let tool_name = &forge_domain::deprecated_alias(tool_name.as_str())
+            .map(ToolName::new)
+            .unwrap_or_else(|| tool_name.clone());
+        let entries: Vec<String> = agent
+            .tools
+            .iter()
+            .flatten()
+            .map(|t| t.to_string())
+            .collect();
+        let published: Vec<String> = if has_surface {
+            surface
+                .published(&state)
                 .iter()
-                .flatten()
-                .map(|t| t.as_str())
-                .filter(|t| !t.contains('*'))
-                .collect();
-            let known = ToolCatalog::contains(tool_name);
+                .map(|t| t.name.to_string())
+                .collect()
+        } else {
+            // No surface (an internal call outside a chat): the agent's exact
+            // entries stand in for it.
+            entries
+                .iter()
+                .filter_map(|entry| forge_domain::PolicyEntry::parse(entry).ok())
+                .filter(|entry| entry.modifier != Some(forge_domain::ToolMode::Ban))
+                .filter_map(|entry| match entry.noun {
+                    forge_domain::Noun::Name(name) => Some(name),
+                    _ => None,
+                })
+                .collect()
+        };
+        let allowed = if has_surface {
+            let legacy = tool_name.to_legacy_mcp_name().map(|n| n.to_string());
+            let prefixed = format!("mcp__{}", tool_name.as_str());
+            published.iter().any(|name| {
+                name == tool_name.as_str() || legacy.as_ref() == Some(name) || *name == prefixed
+            })
+        } else {
+            let meta = forge_domain::ToolMeta {
+                name: tool_name.clone(),
+                alternate_names: tool_name
+                    .to_legacy_mcp_name()
+                    .map(|n| vec![n.to_string()])
+                    .unwrap_or_default(),
+                read_only: false,
+                default_mode: forge_domain::ToolMode::Eager,
+            };
+            forge_domain::select_tools(&entries, &[meta])
+                .mode(tool_name.as_str())
+                .is_some()
+        };
+        if !allowed {
+            tracing::error!(tool_name = %tool_name, "No tool with name");
+            let names: Vec<&str> = published.iter().map(String::as_str).collect();
+            let absent = surface.absent(tool_name, &state);
             return Err(anyhow::Error::new(forge_domain::ToolRefusal(
-                forge_domain::unavailable_message(tool_name.as_str(), &surface, known),
+                forge_domain::unavailable_message(tool_name.as_str(), &names, &absent),
             )));
         }
         Ok(())
@@ -605,7 +1068,8 @@ impl<S> ToolRegistry<S> {
 #[cfg(test)]
 mod tests {
     use forge_domain::{
-        Agent, AgentId, Environment, ModelId, ProviderId, TemplateConfig, ToolCatalog, ToolName,
+        Agent, AgentId, Environment, ModelId, ProviderId, TemplateConfig, ToolCallContext,
+        ToolCatalog, ToolName,
     };
     use pretty_assertions::assert_eq;
 
@@ -626,22 +1090,31 @@ mod tests {
         let result = ToolRegistry::<()>::validate_tool_call(
             &agent(),
             &ToolName::new(ToolCatalog::Read(Default::default())),
+            &ToolCallContext::new(forge_domain::Metrics::default()),
         );
         assert!(result.is_ok(), "Tool call should be valid");
     }
 
     #[tokio::test]
     async fn test_restricted_tool_call_err() {
-        let error = ToolRegistry::<()>::validate_tool_call(&agent(), &ToolName::new("write"))
-            .unwrap_err()
-            .to_string();
+        let error = ToolRegistry::<()>::validate_tool_call(
+            &agent(),
+            &ToolName::new("write"),
+            &ToolCallContext::new(forge_domain::Metrics::default()),
+        )
+        .unwrap_err()
+        .to_string();
         assert_eq!(error, "write is not allowed by this agent's tool policy.");
     }
 
     #[test]
     fn test_unknown_tool_suggests_closest_and_is_a_refusal() {
-        let error =
-            ToolRegistry::<()>::validate_tool_call(&agent(), &ToolName::new("raed")).unwrap_err();
+        let error = ToolRegistry::<()>::validate_tool_call(
+            &agent(),
+            &ToolName::new("raed"),
+            &ToolCallContext::new(forge_domain::Metrics::default()),
+        )
+        .unwrap_err();
         let refusal = error.downcast_ref::<forge_domain::ToolRefusal>().is_some();
         let actual = (refusal, error.to_string());
         let expected = (
@@ -661,7 +1134,11 @@ mod tests {
         )
         .tools(vec![ToolName::new("mcp_*"), ToolName::new("read")]);
 
-        let actual = ToolRegistry::<()>::validate_tool_call(&fixture, &ToolName::new("mcp_foo"));
+        let actual = ToolRegistry::<()>::validate_tool_call(
+            &fixture,
+            &ToolName::new("mcp_foo"),
+            &ToolCallContext::new(forge_domain::Metrics::default()),
+        );
 
         assert!(actual.is_ok());
     }
@@ -675,11 +1152,21 @@ mod tests {
         )
         .tools(vec![ToolName::new("mcp_*"), ToolName::new("read")]);
 
-        let actual_mcp_read =
-            ToolRegistry::<()>::validate_tool_call(&fixture, &ToolName::new("mcp_read"));
-        let actual_mcp_write =
-            ToolRegistry::<()>::validate_tool_call(&fixture, &ToolName::new("mcp_write"));
-        let actual_read = ToolRegistry::<()>::validate_tool_call(&fixture, &ToolName::new("read"));
+        let actual_mcp_read = ToolRegistry::<()>::validate_tool_call(
+            &fixture,
+            &ToolName::new("mcp_read"),
+            &ToolCallContext::new(forge_domain::Metrics::default()),
+        );
+        let actual_mcp_write = ToolRegistry::<()>::validate_tool_call(
+            &fixture,
+            &ToolName::new("mcp_write"),
+            &ToolCallContext::new(forge_domain::Metrics::default()),
+        );
+        let actual_read = ToolRegistry::<()>::validate_tool_call(
+            &fixture,
+            &ToolName::new("read"),
+            &ToolCallContext::new(forge_domain::Metrics::default()),
+        );
 
         assert!(actual_mcp_read.is_ok());
         assert!(actual_mcp_write.is_ok());
@@ -695,7 +1182,11 @@ mod tests {
         )
         .tools(vec![ToolName::new("mcp_*"), ToolName::new("read")]);
 
-        let actual = ToolRegistry::<()>::validate_tool_call(&fixture, &ToolName::new("write"));
+        let actual = ToolRegistry::<()>::validate_tool_call(
+            &fixture,
+            &ToolName::new("write"),
+            &ToolCallContext::new(forge_domain::Metrics::default()),
+        );
 
         let expected = "write is not allowed by this agent's tool policy.";
 
@@ -711,11 +1202,21 @@ mod tests {
         )
         .tools(vec![ToolName::new("read?"), ToolName::new("write")]);
 
-        let actual_read1 =
-            ToolRegistry::<()>::validate_tool_call(&fixture, &ToolName::new("read1"));
-        let actual_readx =
-            ToolRegistry::<()>::validate_tool_call(&fixture, &ToolName::new("readx"));
-        let actual_read = ToolRegistry::<()>::validate_tool_call(&fixture, &ToolName::new("read"));
+        let actual_read1 = ToolRegistry::<()>::validate_tool_call(
+            &fixture,
+            &ToolName::new("read1"),
+            &ToolCallContext::new(forge_domain::Metrics::default()),
+        );
+        let actual_readx = ToolRegistry::<()>::validate_tool_call(
+            &fixture,
+            &ToolName::new("readx"),
+            &ToolCallContext::new(forge_domain::Metrics::default()),
+        );
+        let actual_read = ToolRegistry::<()>::validate_tool_call(
+            &fixture,
+            &ToolName::new("read"),
+            &ToolCallContext::new(forge_domain::Metrics::default()),
+        );
 
         assert!(actual_read1.is_ok());
         assert!(actual_readx.is_ok());
@@ -731,14 +1232,26 @@ mod tests {
         )
         .tools(vec![ToolName::new("tool_[abc]"), ToolName::new("write")]);
 
-        let actual_tool_a =
-            ToolRegistry::<()>::validate_tool_call(&fixture, &ToolName::new("tool_a"));
-        let actual_tool_b =
-            ToolRegistry::<()>::validate_tool_call(&fixture, &ToolName::new("tool_b"));
-        let actual_tool_c =
-            ToolRegistry::<()>::validate_tool_call(&fixture, &ToolName::new("tool_c"));
-        let actual_tool_d =
-            ToolRegistry::<()>::validate_tool_call(&fixture, &ToolName::new("tool_d"));
+        let actual_tool_a = ToolRegistry::<()>::validate_tool_call(
+            &fixture,
+            &ToolName::new("tool_a"),
+            &ToolCallContext::new(forge_domain::Metrics::default()),
+        );
+        let actual_tool_b = ToolRegistry::<()>::validate_tool_call(
+            &fixture,
+            &ToolName::new("tool_b"),
+            &ToolCallContext::new(forge_domain::Metrics::default()),
+        );
+        let actual_tool_c = ToolRegistry::<()>::validate_tool_call(
+            &fixture,
+            &ToolName::new("tool_c"),
+            &ToolCallContext::new(forge_domain::Metrics::default()),
+        );
+        let actual_tool_d = ToolRegistry::<()>::validate_tool_call(
+            &fixture,
+            &ToolName::new("tool_d"),
+            &ToolCallContext::new(forge_domain::Metrics::default()),
+        );
 
         assert!(actual_tool_a.is_ok());
         assert!(actual_tool_b.is_ok());
@@ -755,10 +1268,16 @@ mod tests {
         )
         .tools(vec![ToolName::new("**"), ToolName::new("read")]);
 
-        let actual_any_tool =
-            ToolRegistry::<()>::validate_tool_call(&fixture, &ToolName::new("any_tool_name"));
-        let actual_nested =
-            ToolRegistry::<()>::validate_tool_call(&fixture, &ToolName::new("nested/tool"));
+        let actual_any_tool = ToolRegistry::<()>::validate_tool_call(
+            &fixture,
+            &ToolName::new("any_tool_name"),
+            &ToolCallContext::new(forge_domain::Metrics::default()),
+        );
+        let actual_nested = ToolRegistry::<()>::validate_tool_call(
+            &fixture,
+            &ToolName::new("nested/tool"),
+            &ToolCallContext::new(forge_domain::Metrics::default()),
+        );
 
         assert!(actual_any_tool.is_ok());
         assert!(actual_nested.is_ok());
@@ -773,8 +1292,11 @@ mod tests {
         )
         .tools(vec![ToolName::new("tool_[special]"), ToolName::new("read")]);
 
-        let actual =
-            ToolRegistry::<()>::validate_tool_call(&fixture, &ToolName::new("tool_[special]"));
+        let actual = ToolRegistry::<()>::validate_tool_call(
+            &fixture,
+            &ToolName::new("tool_[special]"),
+            &ToolCallContext::new(forge_domain::Metrics::default()),
+        );
 
         // The glob pattern "tool_[special]" will match "tool_s", "tool_p",
         // etc., not the literal string So this test verifies that exact
@@ -795,11 +1317,21 @@ mod tests {
             ToolName::new("fs_search"),
         ]);
 
-        let actual_read = ToolRegistry::<()>::validate_tool_call(&fixture, &ToolName::new("read"));
-        let actual_write =
-            ToolRegistry::<()>::validate_tool_call(&fixture, &ToolName::new("write"));
-        let actual_invalid =
-            ToolRegistry::<()>::validate_tool_call(&fixture, &ToolName::new("delete"));
+        let actual_read = ToolRegistry::<()>::validate_tool_call(
+            &fixture,
+            &ToolName::new("read"),
+            &ToolCallContext::new(forge_domain::Metrics::default()),
+        );
+        let actual_write = ToolRegistry::<()>::validate_tool_call(
+            &fixture,
+            &ToolName::new("write"),
+            &ToolCallContext::new(forge_domain::Metrics::default()),
+        );
+        let actual_invalid = ToolRegistry::<()>::validate_tool_call(
+            &fixture,
+            &ToolName::new("delete"),
+            &ToolCallContext::new(forge_domain::Metrics::default()),
+        );
 
         assert!(actual_read.is_ok());
         assert!(actual_write.is_ok());
@@ -814,7 +1346,11 @@ mod tests {
             ModelId::new("claude-3-5-sonnet-20241022"),
         );
 
-        let actual = ToolRegistry::<()>::validate_tool_call(&fixture, &ToolName::new("read"));
+        let actual = ToolRegistry::<()>::validate_tool_call(
+            &fixture,
+            &ToolName::new("read"),
+            &ToolCallContext::new(forge_domain::Metrics::default()),
+        );
 
         assert!(actual.is_err());
     }
@@ -828,10 +1364,16 @@ mod tests {
         )
         .tools(vec![ToolName::new("mcp_*_tool")]);
 
-        let actual_match =
-            ToolRegistry::<()>::validate_tool_call(&fixture, &ToolName::new("mcp_read_tool"));
-        let actual_no_match =
-            ToolRegistry::<()>::validate_tool_call(&fixture, &ToolName::new("mcp_read"));
+        let actual_match = ToolRegistry::<()>::validate_tool_call(
+            &fixture,
+            &ToolName::new("mcp_read_tool"),
+            &ToolCallContext::new(forge_domain::Metrics::default()),
+        );
+        let actual_no_match = ToolRegistry::<()>::validate_tool_call(
+            &fixture,
+            &ToolName::new("mcp_read"),
+            &ToolCallContext::new(forge_domain::Metrics::default()),
+        );
 
         assert!(actual_match.is_ok());
         assert!(actual_no_match.is_err());
@@ -848,11 +1390,21 @@ mod tests {
         )
         .tools(vec![ToolName::new("read"), ToolName::new("write")]);
 
-        let actual_read = ToolRegistry::<()>::validate_tool_call(&fixture, &ToolName::new("Read"));
-        let actual_write =
-            ToolRegistry::<()>::validate_tool_call(&fixture, &ToolName::new("Write"));
-        let actual_lowercase_read =
-            ToolRegistry::<()>::validate_tool_call(&fixture, &ToolName::new("read"));
+        let actual_read = ToolRegistry::<()>::validate_tool_call(
+            &fixture,
+            &ToolName::new("Read"),
+            &ToolCallContext::new(forge_domain::Metrics::default()),
+        );
+        let actual_write = ToolRegistry::<()>::validate_tool_call(
+            &fixture,
+            &ToolName::new("Write"),
+            &ToolCallContext::new(forge_domain::Metrics::default()),
+        );
+        let actual_lowercase_read = ToolRegistry::<()>::validate_tool_call(
+            &fixture,
+            &ToolName::new("read"),
+            &ToolCallContext::new(forge_domain::Metrics::default()),
+        );
 
         assert!(actual_read.is_ok(), "Capitalized 'Read' should be accepted");
         assert!(
@@ -1160,6 +1712,7 @@ fn test_all_rendered_tool_descriptions() {
 
     let mut env: Environment = Faker.fake();
     env.cwd = "/home/user/project".into();
+    env.shell = "/bin/bash".to_string();
 
     let template_config = TemplateConfig {
         max_read_size: 2000,
@@ -1192,4 +1745,62 @@ fn test_all_rendered_tool_descriptions() {
         "all_rendered_tool_descriptions",
         all_descriptions.join("\n---\n\n")
     );
+}
+
+/// X1: every native description renders without error on a minimal surface
+/// too: the tool itself plus `read` and `shell`. Co-presence blocks resolve
+/// against the tools actually present; a cross-reference to an absent tool
+/// is dropped, never left as a strict-mode render error.
+#[test]
+fn test_descriptions_render_for_a_minimal_surface() {
+    use fake::{Fake, Faker};
+    use forge_domain::{SurfaceTool, ToolMode, ToolSource};
+
+    let mut env: Environment = Faker.fake();
+    env.cwd = "/home/user/project".into();
+    let handlebars = crate::TemplateEngine::handlebar_instance();
+    let data_for = |own: &str| {
+        let surface: Vec<SurfaceTool> = ["read", "shell", own]
+            .into_iter()
+            .map(|name| SurfaceTool {
+                definition: ToolDefinition::new(name),
+                mode: ToolMode::Eager,
+                source: ToolSource::Native,
+            })
+            .collect();
+        SystemContext {
+            env: Some(env.clone()),
+            tool_names: crate::tool_surface::tool_names_map(&surface, &Default::default()),
+            agents: create_test_agents(),
+            config: Some(TemplateConfig {
+                max_read_size: 2000,
+                max_read_bytes: 262144,
+                max_image_size: 5000,
+            }),
+            ..Default::default()
+        }
+    };
+
+    let failures: Vec<String> = ToolCatalog::iter()
+        .map(|tool| tool.definition())
+        .filter_map(|def| {
+            handlebars
+                .render_template(&def.description, &data_for(def.name.as_str()))
+                .err()
+                .map(|error| format!("{}: {error}", def.name))
+        })
+        .collect();
+    let shell_description = ToolCatalog::iter()
+        .map(|tool| tool.definition())
+        .find(|def| def.name.as_str() == "shell")
+        .unwrap()
+        .description;
+    let shell = handlebars
+        .render_template(&shell_description, &data_for("shell"))
+        .unwrap();
+
+    assert_eq!(failures, Vec::<String>::new());
+    // Co-presence: fs_search is absent, so its cross-reference names nothing.
+    assert!(shell.contains("Read files with `read`"), "{shell}");
+    assert!(!shell.contains("fs_search"), "{shell}");
 }

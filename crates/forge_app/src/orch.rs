@@ -116,6 +116,12 @@ pub struct Orchestrator<S> {
     config: forge_config::ForgeConfig,
     /// `task` nesting depth of this conversation (0 = the user's own).
     task_depth: usize,
+    /// The request's tool surface (T24). When it holds tools, every request
+    /// publishes `surface.published(state)`, so a tool loaded through
+    /// `tool_discovery` appears from the next model call.
+    surface: forge_domain::SharedSurface,
+    /// Model-facing tool names (X23); history keeps canonical names.
+    aliases: forge_domain::AliasMap,
 }
 
 impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orchestrator<S> {
@@ -136,7 +142,20 @@ impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orc
             error_tracker: Default::default(),
             hook: Arc::new(Hook::default()),
             task_depth: 0,
+            surface: Default::default(),
+            aliases: Default::default(),
         }
+    }
+
+    /// Re-derives the published tool definitions from the surface and the
+    /// conversation's surface state (canonical names).
+    fn refresh_tool_definitions(&mut self, tool_context: &ToolCallContext) -> anyhow::Result<()> {
+        if self.surface.with(|data| data.tools.is_empty()) {
+            return Ok(());
+        }
+        let state = tool_context.surface_state()?.snapshot();
+        self.tool_definitions = self.surface.published(&state);
+        Ok(())
     }
 
     /// Get a reference to the internal conversation
@@ -412,9 +431,20 @@ impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orc
         let tool_context = ToolCallContext::new(self.conversation.metrics.clone())
             .sender(self.sender.clone())
             .with_conversation_id(self.conversation.id)
-            .with_task_depth(self.task_depth);
+            .with_task_depth(self.task_depth)
+            .with_surface(self.surface.clone());
 
         while !should_yield {
+            // T24: tools loaded by the previous batch are published from this
+            // request on; the request carries the model-facing (aliased) names.
+            self.refresh_tool_definitions(&tool_context)?;
+            if !self.surface.with(|data| data.tools.is_empty()) {
+                context = context.tools(crate::tool_surface::apply_aliases(
+                    self.tool_definitions.clone(),
+                    &self.aliases,
+                ));
+            }
+
             // Set context for the current loop iteration
             self.conversation.context = Some(context.clone());
             self.services.update(self.conversation.clone()).await?;
@@ -491,15 +521,25 @@ impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orc
                 batch_notice = Some(notice);
             }
 
+            // X23: aliased call names map back to canonical names; history
+            // and dispatch only ever see canonical names.
+            if !self.aliases.is_empty() {
+                for call in message.tool_calls.iter_mut() {
+                    call.name = crate::tool_surface::canonical_name(&call.name, &self.aliases);
+                }
+            }
+
             // X4: drop duplicates, cap the batch, canonicalise names and
             // arguments, and reject unavailable tools and invalid arguments
             // before any call runs.
             let surface = self.tool_definitions.clone();
+            let surface_state = tool_context.surface_state()?.snapshot();
+            let shared = self.surface.clone();
             let batch = normalize_batch(
                 &message.tool_calls,
                 &surface,
                 |name| resolve_surface_name(name, &surface),
-                ToolCatalog::contains,
+                |name| shared.absent(name, &surface_state),
             );
             if let Some(notice) = &batch.notice {
                 batch_notice = Some(match batch_notice {

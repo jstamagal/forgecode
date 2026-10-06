@@ -13,8 +13,8 @@ use forge_api::{
     ChatResponse, CodeRequest, ConfigOperation, Conversation, ConversationId, DeviceCodeRequest,
     Event, InterruptionReason, ModelId, Provider, ProviderId, TextMessage, UserPrompt,
 };
+use forge_app::CommitResult;
 use forge_app::utils::{format_display_path, truncate_key};
-use forge_app::{CommitResult, ToolResolver};
 use forge_config::ForgeConfig;
 use forge_display::MarkdownFormat;
 use forge_domain::{
@@ -495,8 +495,8 @@ impl<A: API + ConsoleWriter + 'static, F: Fn(ForgeConfig) -> A + Send + Sync> UI
                     ListCommand::Config => {
                         self.on_show_config(porcelain).await?;
                     }
-                    ListCommand::Tool { agent } => {
-                        self.on_show_tools(agent, porcelain).await?;
+                    ListCommand::Tool { agent, diag } => {
+                        self.on_show_tools(agent, diag, porcelain).await?;
                     }
                     ListCommand::Mcp => {
                         self.on_show_mcp_servers(porcelain).await?;
@@ -1694,24 +1694,41 @@ impl<A: API + ConsoleWriter + 'static, F: Fn(ForgeConfig) -> A + Send + Sync> UI
         Ok(())
     }
 
-    /// Displays available tools for the current agent
-    async fn on_show_tools(&mut self, agent_id: AgentId, porcelain: bool) -> anyhow::Result<()> {
+    /// Displays the tool surface of an agent (X21) or, with `diag`, the size
+    /// of every tool definition it publishes (X26).
+    async fn on_show_tools(
+        &mut self,
+        agent_id: AgentId,
+        diag: bool,
+        porcelain: bool,
+    ) -> anyhow::Result<()> {
         self.spinner.start(Some("Loading"))?;
         let all_tools = self.api.get_tools().await?;
         let agents = self.api.get_agents().await?;
         let agent = agents.into_iter().find(|agent| agent.id == agent_id);
-        let agent_tools = if let Some(agent) = agent {
-            let resolver = ToolResolver::new(all_tools.clone().into());
-            resolver
-                .resolve(&agent)
-                .into_iter()
-                .map(|def| def.name.clone())
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let known = forge_app::tool_surface::known_tools(
+            all_tools.system.clone(),
+            all_tools.agents.clone(),
+            &all_tools.mcp,
+        );
+        let selection = agent
+            .as_ref()
+            .map(|agent| forge_app::tool_surface::surface_table(agent, &known))
+            .unwrap_or_default();
 
-        let info = format_tools(&agent_tools, &all_tools);
+        let info = if diag {
+            let published: Vec<forge_api::ToolDefinition> = agent
+                .as_ref()
+                .map(|agent| forge_app::tool_surface::resolve_surface(agent, &known))
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|tool| tool.mode == forge_api::ToolMode::Eager)
+                .map(|tool| tool.definition)
+                .collect();
+            crate::tools_display::format_tool_costs(&published)
+        } else {
+            format_tools(&selection, &all_tools)
+        };
         if porcelain {
             self.writeln(
                 Porcelain::from(&info)
@@ -2251,7 +2268,7 @@ impl<A: API + ConsoleWriter + 'static, F: Fn(ForgeConfig) -> A + Send + Sync> UI
             }
             AppCommand::Tools => {
                 let agent_id = self.api.get_active_agent().await.unwrap_or_default();
-                self.on_show_tools(agent_id, false).await?;
+                self.on_show_tools(agent_id, false, false).await?;
             }
             AppCommand::Update => {
                 on_update(self.api.clone(), None).await;

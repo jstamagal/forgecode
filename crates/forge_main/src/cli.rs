@@ -445,11 +445,17 @@ pub enum ListCommand {
     #[command(alias = "configs")]
     Config,
 
-    /// List tools for a specific agent.
+    /// List tools for a specific agent: the mode its `tools:` entries give
+    /// each tool (eager, lazy, ban) and the entry that decided it.
     #[command(alias = "tools")]
     Tool {
         /// Agent ID to list tools for.
         agent: AgentId,
+
+        /// Show description and schema size per published tool and the
+        /// total (X26).
+        #[arg(long)]
+        diag: bool,
     },
 
     /// List MCP servers.
@@ -1287,7 +1293,7 @@ mod tests {
         let fixture = Cli::parse_from(["forge", "list", "tool", "sage"]);
         let actual = match fixture.subcommands {
             Some(TopLevelCommand::List(list)) => match list.command {
-                ListCommand::Tool { agent } => agent,
+                ListCommand::Tool { agent, .. } => agent,
                 _ => AgentId::default(),
             },
             _ => AgentId::default(),

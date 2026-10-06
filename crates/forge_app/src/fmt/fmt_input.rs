@@ -134,6 +134,31 @@ impl FormatContent for ToolCatalog {
             ToolCatalog::Task(input) => {
                 Some(TitleFormat::debug("Task").sub_title(&input.agent_id).into())
             }
+            ToolCatalog::ToolDiscovery(input) => Some(match &input.load {
+                Some(id) => TitleFormat::debug("Load tool").sub_title(id).into(),
+                None => TitleFormat::debug("Discover tools")
+                    .sub_title(&input.query)
+                    .into(),
+            }),
+            ToolCatalog::McpResourceList(input)
+            | ToolCatalog::McpResourceTemplates(input)
+            | ToolCatalog::McpPromptList(input) => Some(
+                TitleFormat::debug(self.to_string())
+                    .sub_title(&input.server)
+                    .into(),
+            ),
+            ToolCatalog::McpResourceRead(input)
+            | ToolCatalog::McpResourceSubscribe(input)
+            | ToolCatalog::McpResourceUnsubscribe(input) => Some(
+                TitleFormat::debug(self.to_string())
+                    .sub_title(format!("{} {}", input.server, input.uri))
+                    .into(),
+            ),
+            ToolCatalog::McpPromptGet(input) => Some(
+                TitleFormat::debug(self.to_string())
+                    .sub_title(format!("{} {}", input.server, input.name))
+                    .into(),
+            ),
         }
     }
 }

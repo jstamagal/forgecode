@@ -5,4 +5,9 @@ Search file contents by regex. `output_mode` is `files_with_matches` (paths, the
 - Results are absolute paths in path order. Bytes that are not valid UTF-8 are shown as `\xNN`.
 - The walk stays on the filesystem `path` is on and does not enter mount points below it; name a mounted share as `path` to search it. A search is bounded at 120 seconds.
 - `head_limit` and `offset` page through a large result; the result names the next `offset` when there are more. A result too large to show inline is written to a file whose path the result names.
-- Use `{{tool_names.read}}` to see a file once a search has found it, and `{{tool_names.task}}` for open-ended investigations that need several rounds of search and reading.
+{{#if tool_names.read}}
+- Use `{{tool_names.read}}` to see a file once a search has found it.
+{{/if}}
+{{#if tool_names.task}}
+- Use `{{tool_names.task}}` for open-ended investigations that need several rounds of search and reading.
+{{/if}}

@@ -247,6 +247,17 @@ pub trait McpConfigManager: Send + Sync {
 pub trait McpService: Send + Sync {
     async fn get_mcp_servers(&self) -> anyhow::Result<McpServers>;
     async fn execute_mcp(&self, call: ToolCallFull) -> anyhow::Result<ToolOutput>;
+    /// M3: a resource or prompt request to the connected server `server`;
+    /// the result has the server's configured secrets redacted.
+    ///
+    /// # Errors
+    /// Returns an error when the server is not connected or the request
+    /// fails.
+    async fn mcp_control(
+        &self,
+        server: &str,
+        request: crate::McpControl,
+    ) -> anyhow::Result<serde_json::Value>;
     /// Refresh the MCP cache by fetching fresh data
     async fn reload_mcp(&self) -> anyhow::Result<()>;
     /// Applies the interactive trust gate for any project-local MCP config.
@@ -842,6 +853,14 @@ impl<I: Services> McpService for I {
 
     async fn execute_mcp(&self, call: ToolCallFull) -> anyhow::Result<ToolOutput> {
         self.mcp_service().execute_mcp(call).await
+    }
+
+    async fn mcp_control(
+        &self,
+        server: &str,
+        request: crate::McpControl,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.mcp_service().mcp_control(server, request).await
     }
 
     async fn reload_mcp(&self) -> anyhow::Result<()> {

@@ -10,6 +10,6 @@ Read one file: text, PDF, image, or notebook. Relative paths resolve against the
 {{#if (contains model.input_modalities "image")}}
 - Images (PNG, JPEG, GIF, WebP) come back as images; a PDF with no extractable text comes back as an image. Images and image-fallback PDFs larger than {{config.maxImageSize}} bytes are refused.
 {{/if}}
-- Directories, pipes and other special files are refused; use `{{tool_names.fs_search}}` to find files.
-- Reading records which lines you have seen: `{{tool_names.patch}}` and an overwriting `{{tool_names.write}}` require a prior read of the file, and `{{tool_names.patch}}` requires that every line it changes was shown.
+- Directories, pipes and other special files are refused{{#if tool_names.fs_search}}; use `{{tool_names.fs_search}}` to find files{{/if}}.
+- Reading records which lines you have seen.{{#if tool_names.write}} An overwriting `{{tool_names.write}}` requires a prior read of the file.{{/if}}{{#if tool_names.patch}} `{{tool_names.patch}}` requires a prior read and that every line it changes was shown.{{/if}}
 - You can call multiple tools in a single response; read several files in parallel when you need them.

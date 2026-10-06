@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub use crate::file_operation::FileOperation;
-use crate::{ReadLedger, Todo, TodoItem, TodoStatus};
+use crate::{ReadLedger, SurfaceState, Todo, TodoItem, TodoStatus};
 
 /// Read coverage shared by every clone of a conversation's [`Metrics`], so
 /// file tools and the executor see one ledger for the whole conversation.
@@ -49,6 +49,39 @@ impl<'de> Deserialize<'de> for SharedLedger {
     }
 }
 
+/// Tool-surface state (loaded catalog ids, offered skills) shared by every
+/// clone of a conversation's [`Metrics`] (X29).
+#[derive(Debug, Clone, Default)]
+pub struct SharedSurfaceState(Arc<Mutex<SurfaceState>>);
+
+impl SharedSurfaceState {
+    /// Runs `f` with exclusive access to the state.
+    pub fn with<R>(&self, f: impl FnOnce(&mut SurfaceState) -> R) -> R {
+        let mut guard = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        f(&mut guard)
+    }
+
+    /// A copy of the current state.
+    pub fn snapshot(&self) -> SurfaceState {
+        self.with(|state| state.clone())
+    }
+}
+
+impl Serialize for SharedSurfaceState {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.snapshot().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SharedSurfaceState {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        SurfaceState::deserialize(deserializer).map(|state| Self(Arc::new(Mutex::new(state))))
+    }
+}
+
 #[derive(Debug, Clone, Default, Setters, Serialize, Deserialize)]
 #[setters(into, strip_option)]
 pub struct Metrics {
@@ -72,6 +105,11 @@ pub struct Metrics {
     #[serde(default)]
     #[setters(skip)]
     pub reads: SharedLedger,
+
+    /// Tools loaded through `tool_discovery` and skills already offered.
+    #[serde(default)]
+    #[setters(skip)]
+    pub surface: SharedSurfaceState,
 }
 
 impl Metrics {

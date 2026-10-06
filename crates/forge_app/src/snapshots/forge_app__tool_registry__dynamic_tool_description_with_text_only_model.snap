@@ -12,5 +12,5 @@ Read one file: text, PDF, image, or notebook. Relative paths resolve against the
 - A Jupyter notebook (.ipynb) read without a range comes back as its cells, each with its id, type, source and a summary of its outputs; a line or byte range reads its raw JSON.
 - A PDF comes back as extracted text (via `pdftotext`).
 - Directories, pipes and other special files are refused; use `fs_search` to find files.
-- Reading records which lines you have seen: `patch` and an overwriting `write` require a prior read of the file, and `patch` requires that every line it changes was shown.
+- Reading records which lines you have seen. An overwriting `write` requires a prior read of the file. `patch` requires a prior read and that every line it changes was shown.
 - You can call multiple tools in a single response; read several files in parallel when you need them.

@@ -22,6 +22,20 @@ pub struct Skill {
 
     /// List of resource files in the skill directory
     pub resources: Vec<PathBuf>,
+
+    /// Hidden from the model's skill listing; the user invokes it (T21).
+    #[serde(default)]
+    pub disable_model_invocation: bool,
+
+    /// Tools the skill activates when loaded (intersected with the agent's
+    /// policy).
+    #[serde(default)]
+    pub tools: Vec<String>,
+
+    /// Globs over workspace-relative paths; the first time a matching file is
+    /// read or edited in a conversation, the model is offered the skill.
+    #[serde(default)]
+    pub paths: Vec<String>,
 }
 
 impl Skill {
@@ -43,7 +57,28 @@ impl Skill {
             command: prompt.into(),
             description: description.into(),
             resources: Vec::new(),
+            disable_model_invocation: false,
+            tools: Vec::new(),
+            paths: Vec::new(),
         }
+    }
+
+    /// Whether `relative` (a workspace-relative path) matches one of the
+    /// skill's `paths` globs.
+    pub fn matches_path(&self, relative: &str) -> bool {
+        self.paths.iter().any(|glob| {
+            glob::Pattern::new(glob)
+                .map(|pattern| {
+                    pattern.matches_with(
+                        relative,
+                        glob::MatchOptions {
+                            require_literal_separator: false,
+                            ..Default::default()
+                        },
+                    )
+                })
+                .unwrap_or(false)
+        })
     }
 }
 

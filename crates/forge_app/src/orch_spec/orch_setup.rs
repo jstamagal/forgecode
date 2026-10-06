@@ -40,6 +40,8 @@ pub struct TestContext {
     pub output: TestOutput,
     pub agent: Agent,
     pub tools: Vec<ToolDefinition>,
+    /// A request tool surface (T24); when set, requests publish from it.
+    pub surface: Option<forge_domain::SharedSurface>,
     /// ForgeConfig used to populate TemplateConfig for
     /// system prompt rendering in tests.
     pub config: ForgeConfig,
@@ -81,6 +83,7 @@ impl Default for TestContext {
                 ToolDefinition::new("fs_read"),
                 ToolDefinition::new("fs_write"),
             ],
+            surface: None,
         }
     }
 }

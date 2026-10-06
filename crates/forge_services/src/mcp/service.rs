@@ -1,31 +1,51 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use anyhow::Context;
 use forge_app::domain::{
-    McpConfig, McpServerConfig, McpServers, ServerName, ToolCallFull, ToolDefinition, ToolName,
-    ToolOutput,
+    McpConfig, McpServerConfig, McpServers, ServerName, ToolCallFull, ToolCatalog, ToolDefinition,
+    ToolName, ToolOutput, ToolValue,
 };
 use forge_app::{
     EnvironmentInfra, KVStore, McpClientInfra, McpConfigManager, McpServerInfra, McpService,
 };
+use strum::IntoEnumIterator;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::mcp::tool::McpExecutor;
 
-fn generate_mcp_tool_name(server_name: &ServerName, tool_name: &ToolName) -> ToolName {
-    let sanitized_server_name = ToolName::sanitized(server_name.to_string().as_str());
-    let sanitized_tool_name = tool_name.clone().into_sanitized();
+/// Names MCP tools may not take: native tools and `tool_discovery`.
+fn reserved_tool_names() -> BTreeSet<String> {
+    ToolCatalog::iter()
+        .map(|tool| tool.definition().name.to_string())
+        .collect()
+}
 
-    ToolName::new(format!(
-        "mcp_{sanitized_server_name}_tool_{sanitized_tool_name}"
-    ))
+/// Redacts configured secrets from every text value of `output`.
+fn redact_output(output: ToolOutput, secrets: &[String]) -> ToolOutput {
+    if secrets.is_empty() {
+        return output;
+    }
+    let values = output
+        .values
+        .into_iter()
+        .map(|value| match value {
+            ToolValue::Text(text) => ToolValue::Text(forge_app::domain::redact(&text, secrets)),
+            other => other,
+        })
+        .collect();
+    ToolOutput { values, ..output }
 }
 
 #[derive(Clone)]
 pub struct ForgeMcpService<M, I, C> {
     tools: Arc<RwLock<HashMap<ToolName, ToolHolder<McpExecutor<C>>>>>,
+    /// Connected clients by server name (M3 controls address a server).
+    clients: Arc<RwLock<HashMap<String, Arc<C>>>>,
     failed_servers: Arc<RwLock<HashMap<ServerName, String>>>,
+    /// M5: configured secret values per server, redacted from results and
+    /// errors.
+    secrets: Arc<RwLock<HashMap<String, Vec<String>>>>,
     previous_config_hash: Arc<Mutex<u64>>,
     init_lock: Arc<Mutex<()>>,
     manager: Arc<M>,
@@ -49,7 +69,9 @@ where
     pub fn new(manager: Arc<M>, infra: Arc<I>) -> Self {
         Self {
             tools: Default::default(),
+            clients: Default::default(),
             failed_servers: Default::default(),
+            secrets: Default::default(),
             previous_config_hash: Arc::new(Mutex::new(Default::default())),
             init_lock: Arc::new(Mutex::new(())),
             manager,
@@ -61,28 +83,48 @@ where
         *self.previous_config_hash.lock().await != config.cache_key()
     }
 
-    async fn insert_clients(&self, server_name: &ServerName, client: Arc<C>) -> anyhow::Result<()> {
-        let tools = client.list().await?;
-
-        let mut tool_map = self.tools.write().await;
-
-        for mut tool in tools.into_iter() {
-            let actual_name = tool.name.clone();
-            let server = McpExecutor::new(actual_name, client.clone())?;
-            let generated_name = generate_mcp_tool_name(server_name, &tool.name);
-
-            tool.name = generated_name.clone();
-
-            tool_map.insert(
-                generated_name,
-                ToolHolder {
-                    definition: tool,
-                    executable: server,
-                    server_name: server_name.to_string(),
-                },
-            );
+    /// M1: publishes every connected server's tools as `{server}__{tool}`,
+    /// trimmed to 64 characters, with collisions disambiguated (and logged)
+    /// and native tool names withheld.
+    async fn insert_clients(
+        &self,
+        connected: Vec<(ServerName, Arc<C>, Vec<ToolDefinition>)>,
+    ) -> anyhow::Result<()> {
+        let listing: BTreeMap<String, Vec<String>> = connected
+            .iter()
+            .map(|(server, _, tools)| {
+                (
+                    server.to_string(),
+                    tools.iter().map(|t| t.name.to_string()).collect(),
+                )
+            })
+            .collect();
+        let (names, warnings) =
+            forge_app::domain::assign_public_names(&listing, &reserved_tool_names());
+        for warning in warnings {
+            tracing::warn!("{warning}");
         }
-
+        let mut tool_map = self.tools.write().await;
+        let mut clients = self.clients.write().await;
+        for (server_name, client, tools) in connected {
+            clients.insert(server_name.to_string(), client.clone());
+            for mut tool in tools {
+                let key = (server_name.to_string(), tool.name.to_string());
+                let Some(public) = names.get(&key) else {
+                    continue;
+                };
+                let executable = McpExecutor::new(tool.name.clone(), client.clone())?;
+                tool.name = ToolName::new(public);
+                tool_map.insert(
+                    tool.name.clone(),
+                    ToolHolder {
+                        definition: tool,
+                        executable,
+                        server_name: server_name.to_string(),
+                    },
+                );
+            }
+        }
         Ok(())
     }
 
@@ -90,14 +132,16 @@ where
         &self,
         server_name: &ServerName,
         config: McpServerConfig,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<(Arc<C>, Vec<ToolDefinition>)> {
         let env_vars = self.infra.get_env_vars();
         let environment = self.infra.get_environment();
         let client = self.infra.connect(config, &env_vars, &environment).await?;
         let client = Arc::new(C::from(client));
-        self.insert_clients(server_name, client).await?;
-
-        Ok(())
+        let tools = client
+            .list()
+            .await
+            .with_context(|| format!("Failed to list tools of MCP server {server_name}"))?;
+        Ok((client, tools))
     }
 
     async fn ensure_mcp_initialized(&self) -> anyhow::Result<()> {
@@ -136,6 +180,11 @@ where
 
         // Clear failed servers map before attempting new connections
         self.failed_servers.write().await.clear();
+        *self.secrets.write().await = mcp
+            .mcp_servers
+            .iter()
+            .map(|(name, server)| (name.to_string(), forge_app::domain::secret_values(server)))
+            .collect();
 
         let connections: Vec<_> = mcp
             .mcp_servers
@@ -153,21 +202,29 @@ where
 
         let results = futures::future::join_all(connections).await;
 
+        let mut connected = Vec::new();
         for (server_name, result) in results {
             match result {
-                Ok(_) => {}
+                Ok((client, tools)) => connected.push((server_name, client, tools)),
                 Err(error) => {
-                    // Format error with full chain for detailed diagnostics
-                    // Using Debug formatting with alternate flag shows the full
-                    // error chain
-                    let error_string = format!("{error:?}");
+                    // Format error with full chain for detailed diagnostics,
+                    // with configured secrets redacted (M5).
+                    let secrets = self
+                        .secrets
+                        .read()
+                        .await
+                        .get(&server_name.to_string())
+                        .cloned()
+                        .unwrap_or_default();
+                    let error_string = forge_app::domain::redact(&format!("{error:?}"), &secrets);
                     self.failed_servers
                         .write()
                         .await
-                        .insert(server_name.clone(), error_string.clone());
+                        .insert(server_name.clone(), error_string);
                 }
             }
         }
+        self.insert_clients(connected).await?;
 
         // Write the hash only after join_all finishes so that any waiter on
         // init_lock re-checks is_config_modified only once self.tools is fully
@@ -179,6 +236,7 @@ where
 
     async fn list(&self) -> anyhow::Result<McpServers> {
         self.ensure_mcp_initialized().await?;
+        self.refresh_changed_servers().await?;
 
         let tools = self.tools.read().await;
         let mut grouped_tools = std::collections::HashMap::new();
@@ -194,8 +252,45 @@ where
 
         Ok(McpServers::new(grouped_tools, failures))
     }
+
+    /// M2: re-lists the tools of every server that sent
+    /// `notifications/tools/list_changed`, and republishes the names of all
+    /// connected servers (a new remote tool can collide with another
+    /// server's). A failed refresh keeps the server marked changed.
+    async fn refresh_changed_servers(&self) -> anyhow::Result<()> {
+        let clients: Vec<(String, Arc<C>)> = self
+            .clients
+            .read()
+            .await
+            .iter()
+            .map(|(name, client)| (name.clone(), client.clone()))
+            .collect();
+        let changed: Vec<&(String, Arc<C>)> = clients
+            .iter()
+            .filter(|(_, client)| client.take_tools_changed())
+            .collect();
+        if changed.is_empty() {
+            return Ok(());
+        }
+        let mut connected = Vec::new();
+        for (name, client) in &clients {
+            match client.list().await {
+                Ok(tools) => {
+                    connected.push((ServerName::from(name.clone()), client.clone(), tools))
+                }
+                Err(error) => {
+                    tracing::warn!(server = %name, %error, "MCP tools/list refresh failed")
+                }
+            }
+        }
+        self.tools.write().await.clear();
+        self.insert_clients(connected).await?;
+        // Cached listings are stale now.
+        self.infra.cache_clear().await
+    }
     async fn clear_tools(&self) {
-        self.tools.write().await.clear()
+        self.tools.write().await.clear();
+        self.clients.write().await.clear();
     }
 
     async fn call(&self, call: ToolCallFull) -> anyhow::Result<ToolOutput> {
@@ -204,15 +299,37 @@ where
 
         let tools = self.tools.read().await;
 
-        // Try exact match first, then fall back to legacy-format lookup for
-        // tool calls arriving in the Claude Code `mcp__{server}__{tool}`
-        // format.
+        // M1: the public name is `{server}__{tool}`; the Claude Code form
+        // `mcp__{server}__{tool}` and the old `mcp_{server}_tool_{tool}` form
+        // are accepted on incoming calls.
+        let name = call.name.as_str();
+        let legacy = name
+            .strip_prefix("mcp_")
+            .and_then(|rest| rest.split_once("_tool_"))
+            .map(|(server, tool)| forge_app::domain::public_tool_name(server, tool));
         let tool = tools
             .get(&call.name)
-            .or_else(|| call.name.to_legacy_mcp_name().and_then(|n| tools.get(&n)))
-            .context("Tool not found")?;
+            .or_else(|| {
+                name.strip_prefix("mcp__")
+                    .and_then(|n| tools.get(&ToolName::new(n)))
+            })
+            .or_else(|| legacy.and_then(|n| tools.get(&ToolName::new(n))))
+            .with_context(|| format!("MCP tool {name} is no longer available"))?;
 
-        tool.executable.call_tool(call.arguments.parse()?).await
+        let secrets = self
+            .secrets
+            .read()
+            .await
+            .get(&tool.server_name)
+            .cloned()
+            .unwrap_or_default();
+        match tool.executable.call_tool(call.arguments.parse()?).await {
+            Ok(output) => Ok(redact_output(output, &secrets)),
+            Err(error) => Err(anyhow::anyhow!(forge_app::domain::redact(
+                &format!("{error:#}"),
+                &secrets
+            ))),
+        }
     }
 
     /// Refresh the MCP cache by clearing cached data.
@@ -251,6 +368,9 @@ where
         let trusted_mcp = self.manager.filter_trusted(raw_mcp).await?;
         let config_hash = trusted_mcp.cache_key();
 
+        // A server that announced a changed tool list invalidates the cache.
+        self.refresh_changed_servers().await?;
+
         // Check if cache is valid (exists and not expired)
         if let Some(cache) = self.infra.cache_get::<_, McpServers>(&config_hash).await? {
             return Ok(cache.clone());
@@ -263,6 +383,38 @@ where
 
     async fn execute_mcp(&self, call: ToolCallFull) -> anyhow::Result<ToolOutput> {
         self.call(call).await
+    }
+
+    async fn mcp_control(
+        &self,
+        server: &str,
+        request: forge_app::McpControl,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.ensure_mcp_initialized().await?;
+        let client = self
+            .clients
+            .read()
+            .await
+            .get(server)
+            .cloned()
+            .with_context(|| format!("MCP server {server:?} is not connected"))?;
+        let secrets = self
+            .secrets
+            .read()
+            .await
+            .get(server)
+            .cloned()
+            .unwrap_or_default();
+        match client.control(request).await {
+            Ok(value) => {
+                let text = forge_app::domain::redact(&value.to_string(), &secrets);
+                Ok(serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text)))
+            }
+            Err(error) => Err(anyhow::anyhow!(forge_app::domain::redact(
+                &format!("{error:#}"),
+                &secrets
+            ))),
+        }
     }
 
     async fn reload_mcp(&self) -> anyhow::Result<()> {
@@ -298,17 +450,35 @@ mod tests {
     use pretty_assertions::assert_eq;
     use serde::de::DeserializeOwned;
 
-    use super::{ForgeMcpService, generate_mcp_tool_name};
+    use super::ForgeMcpService;
 
     // ── Mock MCP client ──────────────────────────────────────────────────────
 
-    #[derive(Clone)]
-    struct MockMcpClient;
+    /// Mock MCP server; `generation` > 0 adds a second tool, and `changed`
+    /// is the pending list_changed flag.
+    #[derive(Clone, Default)]
+    struct MockMcpClient {
+        generation: Arc<std::sync::atomic::AtomicUsize>,
+        changed: Arc<std::sync::atomic::AtomicBool>,
+    }
 
     #[async_trait::async_trait]
     impl McpClientInfra for MockMcpClient {
         async fn list(&self) -> anyhow::Result<Vec<ToolDefinition>> {
-            Ok(vec![ToolDefinition::new("test_tool")])
+            Ok(
+                match self.generation.load(std::sync::atomic::Ordering::SeqCst) {
+                    0 => vec![ToolDefinition::new("test_tool")],
+                    _ => vec![
+                        ToolDefinition::new("test_tool"),
+                        ToolDefinition::new("new_tool"),
+                    ],
+                },
+            )
+        }
+
+        fn take_tools_changed(&self) -> bool {
+            self.changed
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
         }
 
         async fn call(
@@ -317,6 +487,21 @@ mod tests {
             _input: serde_json::Value,
         ) -> anyhow::Result<ToolOutput> {
             Ok(ToolOutput::text("mock result"))
+        }
+
+        async fn control(
+            &self,
+            request: forge_app::McpControl,
+        ) -> anyhow::Result<serde_json::Value> {
+            Ok(match request {
+                forge_app::McpControl::ListResources => {
+                    serde_json::json!([{"uri": "file:///notes.md", "name": "notes"}])
+                }
+                forge_app::McpControl::ReadResource { uri } => {
+                    serde_json::json!({"contents": [{"uri": uri, "text": "token=s3cr3t-v4lue"}]})
+                }
+                other => serde_json::json!({"request": format!("{other:?}")}),
+            })
         }
     }
 
@@ -330,7 +515,14 @@ mod tests {
             let mut servers = BTreeMap::new();
             servers.insert(
                 ServerName::from("test-server".to_string()),
-                McpServerConfig::new_stdio("echo", vec![], None),
+                McpServerConfig::new_stdio(
+                    "echo",
+                    vec![],
+                    Some(BTreeMap::from([(
+                        "API_TOKEN".to_string(),
+                        "s3cr3t-v4lue".to_string(),
+                    )])),
+                ),
             );
             Ok(McpConfig { mcp_servers: servers })
         }
@@ -351,8 +543,10 @@ mod tests {
 
     // ── Mock infrastructure ──────────────────────────────────────────────────
 
-    #[derive(Clone)]
-    struct MockInfra;
+    #[derive(Clone, Default)]
+    struct MockInfra {
+        client: MockMcpClient,
+    }
 
     #[async_trait::async_trait]
     impl McpServerInfra for MockInfra {
@@ -364,7 +558,7 @@ mod tests {
             _env_vars: &BTreeMap<String, String>,
             _environment: &Environment,
         ) -> anyhow::Result<MockMcpClient> {
-            Ok(MockMcpClient)
+            Ok(self.client.clone())
         }
     }
 
@@ -418,23 +612,109 @@ mod tests {
     // ── Fixture ──────────────────────────────────────────────────────────────
 
     fn fixture() -> ForgeMcpService<MockMcpManager, MockInfra, MockMcpClient> {
-        ForgeMcpService::new(Arc::new(MockMcpManager), Arc::new(MockInfra))
+        ForgeMcpService::new(Arc::new(MockMcpManager), Arc::new(MockInfra::default()))
     }
 
-    #[test]
-    fn test_generate_mcp_tool_name_uses_legacy_format() {
-        let fixture = ServerName::from("hugging-face".to_string());
-        let actual = generate_mcp_tool_name(&fixture, &ToolName::new("read-channel"));
-        let expected = ToolName::new("mcp_hugging_face_tool_read_channel");
-        assert_eq!(actual, expected);
+    #[tokio::test]
+    async fn test_list_changed_relists_tools() {
+        let infra = MockInfra::default();
+        let service: ForgeMcpService<MockMcpManager, MockInfra, MockMcpClient> =
+            ForgeMcpService::new(Arc::new(MockMcpManager), Arc::new(infra.clone()));
+        let names = |servers: forge_app::domain::McpServers| -> Vec<String> {
+            let mut names: Vec<String> = servers
+                .get_servers()
+                .values()
+                .flatten()
+                .map(|tool| tool.name.to_string())
+                .collect();
+            names.sort();
+            names
+        };
+        let before = names(service.get_mcp_servers().await.unwrap());
+
+        // The server adds a tool and sends notifications/tools/list_changed.
+        infra
+            .client
+            .generation
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        infra
+            .client
+            .changed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let after = names(service.get_mcp_servers().await.unwrap());
+
+        assert_eq!(before, vec!["test_server__test_tool"]);
+        assert_eq!(
+            after,
+            vec!["test_server__new_tool", "test_server__test_tool"]
+        );
     }
 
-    #[test]
-    fn test_generate_mcp_tool_name_sanitizes_server_and_tool_names() {
-        let fixture = ServerName::from("claude.ai Slack".to_string());
-        let actual = generate_mcp_tool_name(&fixture, &ToolName::new("Add comment"));
-        let expected = ToolName::new("mcp_claude_ai_slack_tool_add_comment");
-        assert_eq!(actual, expected);
+    #[tokio::test]
+    async fn test_tools_are_published_as_server_double_underscore_tool() {
+        let service = fixture();
+
+        let servers = service.get_mcp_servers().await.unwrap();
+        let actual: Vec<String> = servers
+            .get_servers()
+            .values()
+            .flatten()
+            .map(|tool| tool.name.to_string())
+            .collect();
+
+        assert_eq!(actual, vec!["test_server__test_tool".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_incoming_claude_code_and_legacy_names_resolve() {
+        let service = fixture();
+        service.get_mcp_servers().await.unwrap();
+
+        let claude = service
+            .execute_mcp(ToolCallFull::new(ToolName::new(
+                "mcp__test_server__test_tool",
+            )))
+            .await
+            .unwrap();
+        let legacy = service
+            .execute_mcp(ToolCallFull::new(ToolName::new(
+                "mcp_test_server_tool_test_tool",
+            )))
+            .await
+            .unwrap();
+        let missing = service
+            .execute_mcp(ToolCallFull::new(ToolName::new("test_server__gone")))
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(claude, ToolOutput::text("mock result"));
+        assert_eq!(legacy, ToolOutput::text("mock result"));
+        assert_eq!(missing, "MCP tool test_server__gone is no longer available");
+    }
+
+    #[tokio::test]
+    async fn test_resource_read_is_redacted_and_unknown_server_refused() {
+        let service = fixture();
+
+        let read = service
+            .mcp_control(
+                "test-server",
+                forge_app::McpControl::ReadResource { uri: "file:///notes.md".to_string() },
+            )
+            .await
+            .unwrap();
+        let unknown = service
+            .mcp_control("nope", forge_app::McpControl::ListPrompts)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(
+            read,
+            serde_json::json!({"contents": [{"uri": "file:///notes.md", "text": "token=[REDACTED]"}]})
+        );
+        assert_eq!(unknown, "MCP server \"nope\" is not connected");
     }
 
     #[test]

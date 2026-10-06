@@ -198,6 +198,11 @@
       "default": 0,
       "minimum": 0
     },
+    "mcp": {
+      "description": "MCP settings (per-agent server/tool policy).",
+      "$ref": "#/$defs/McpSettings",
+      "default": {}
+    },
     "merge_system_messages": {
       "description": "When `true`, all system messages in the conversation are merged into a\nsingle leading system message before the request is sent. Enable this\nfor providers that reject requests containing system messages after\nuser or assistant turns (e.g. vLLM, NVIDIA NIM).",
       "type": "boolean",
@@ -316,6 +321,13 @@
         }
       ]
     },
+    "tool_alias_profiles": {
+      "description": "Model-facing tool names for matching models (X23); the first profile\nwhose `match` hits the model or provider id applies.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ToolAliasProfile"
+      }
+    },
     "tool_supported": {
       "description": "Whether tool use is supported in the current environment; when false,\nall tool calls are disabled.",
       "type": "boolean",
@@ -371,6 +383,29 @@
     }
   },
   "$defs": {
+    "AllowDeny": {
+      "description": "Allow/deny glob lists.",
+      "type": "object",
+      "properties": {
+        "allow": {
+          "description": "Globs that are allowed; absent allows everything.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "deny": {
+          "description": "Globs that are denied; deny wins over allow.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
     "AutoDumpFormat": {
       "description": "The output format used when auto-dumping a conversation on task completion.",
       "oneOf": [
@@ -628,6 +663,33 @@
           "const": "image"
         }
       ]
+    },
+    "McpAgentPolicy": {
+      "description": "MCP policy for one agent (M4): which servers and which tools (by their\n`{server}__{tool}` name) it may use.",
+      "type": "object",
+      "properties": {
+        "servers": {
+          "$ref": "#/$defs/AllowDeny",
+          "default": {}
+        },
+        "tools": {
+          "$ref": "#/$defs/AllowDeny",
+          "default": {}
+        }
+      }
+    },
+    "McpSettings": {
+      "description": "`[mcp]` settings.",
+      "type": "object",
+      "properties": {
+        "agents": {
+          "description": "Per-agent server and tool policy, keyed by agent id.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/McpAgentPolicy"
+          }
+        }
+      }
     },
     "Model": {
       "type": "object",
@@ -982,6 +1044,30 @@
         "1.1",
         "1.2",
         "1.3"
+      ]
+    },
+    "ToolAliasProfile": {
+      "description": "Model-facing tool names for models whose id or provider matches (X23).",
+      "type": "object",
+      "properties": {
+        "aliases": {
+          "description": "Canonical tool name → name shown to the model (e.g. `read = \"Read\"`).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "match": {
+          "description": "Case-insensitive substrings tested against the model id and the\nprovider id; the first profile with a hit applies.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "match",
+        "aliases"
       ]
     },
     "Update": {

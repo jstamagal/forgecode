@@ -8,7 +8,7 @@ use crate::operation::ToolOperation;
 use crate::services::{ReadRequest, Services, ShellService};
 use crate::{
     AgentRegistry, ConversationService, EnvironmentInfra, FsPatchService, FsReadService,
-    FsRemoveService, FsSearchService, FsUndoService, FsWriteService, ImageReadService,
+    FsRemoveService, FsSearchService, FsUndoService, FsWriteService, ImageReadService, McpService,
     NetFetchService, PlanCreateService, ProviderService, SkillFetchService,
 };
 
@@ -180,6 +180,22 @@ impl<
             }
             ToolCatalog::Skill(input) => {
                 let skill = self.services.fetch_skill(input.name.clone()).await?;
+                if skill.disable_model_invocation {
+                    anyhow::bail!(
+                        "skill {} is invoked by the user only (disable-model-invocation)",
+                        skill.name
+                    );
+                }
+                // T21: the skill's `tools:` that this agent may load are
+                // loaded (published from the next model call).
+                let surface = context.surface();
+                let state = context.surface_state()?;
+                for tool in &skill.tools {
+                    if let Some(id) = surface.loadable_id(tool, &state.snapshot()) {
+                        state.with(|s| s.loaded.insert(id));
+                    }
+                }
+                state.with(|s| s.offered_skills.insert(skill.name.clone()));
                 ToolOperation::Skill { output: skill }
             }
             ToolCatalog::TodoWrite(input) => {
@@ -192,11 +208,67 @@ impl<
                 let todos = context.get_todos()?;
                 ToolOperation::TodoRead { output: todos }
             }
-            ToolCatalog::Task(_) => {
-                // Task tools are handled in ToolRegistry before reaching here
-                unreachable!("Task tool should be handled in ToolRegistry")
+            ToolCatalog::Task(_) | ToolCatalog::ToolDiscovery(_) => {
+                // Handled in ToolRegistry: they act on agents and on the
+                // request's tool surface.
+                unreachable!("task and tool_discovery are handled in ToolRegistry")
+            }
+            // M3: resource and prompt controls on a connected MCP server.
+            ToolCatalog::McpResourceList(input) => {
+                self.mcp_control(&input.server, crate::McpControl::ListResources)
+                    .await?
+            }
+            ToolCatalog::McpResourceTemplates(input) => {
+                self.mcp_control(&input.server, crate::McpControl::ListResourceTemplates)
+                    .await?
+            }
+            ToolCatalog::McpResourceRead(input) => {
+                self.mcp_control(
+                    &input.server,
+                    crate::McpControl::ReadResource { uri: input.uri },
+                )
+                .await?
+            }
+            ToolCatalog::McpResourceSubscribe(input) => {
+                self.mcp_control(
+                    &input.server,
+                    crate::McpControl::Subscribe { uri: input.uri },
+                )
+                .await?
+            }
+            ToolCatalog::McpResourceUnsubscribe(input) => {
+                self.mcp_control(
+                    &input.server,
+                    crate::McpControl::Unsubscribe { uri: input.uri },
+                )
+                .await?
+            }
+            ToolCatalog::McpPromptList(input) => {
+                self.mcp_control(&input.server, crate::McpControl::ListPrompts)
+                    .await?
+            }
+            ToolCatalog::McpPromptGet(input) => {
+                let arguments = input.arguments.map(|args| {
+                    args.into_iter()
+                        .map(|(k, v)| (k, serde_json::Value::String(v)))
+                        .collect()
+                });
+                self.mcp_control(
+                    &input.server,
+                    crate::McpControl::GetPrompt { name: input.name, arguments },
+                )
+                .await?
             }
         })
+    }
+
+    async fn mcp_control(
+        &self,
+        server: &str,
+        request: crate::McpControl,
+    ) -> anyhow::Result<ToolOperation> {
+        let value = self.services.mcp_control(server, request).await?;
+        Ok(ToolOperation::Output { output: ToolOutput::text(serde_json::to_string(&value)?) })
     }
 
     pub async fn execute(

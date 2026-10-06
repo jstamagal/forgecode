@@ -378,6 +378,19 @@ fn extract_tool_info(call: &ToolCallFull, current_todos: &[Todo]) -> Option<Summ
             }
             ToolCatalog::TodoRead(_) => Some(SummaryTool::TodoRead),
             ToolCatalog::Task(input) => Some(SummaryTool::Task { agent_id: input.agent_id }),
+            // Loading a tool changes the surface, not the work; the loaded set
+            // is kept with the conversation and survives compaction.
+            ToolCatalog::ToolDiscovery(_) => None,
+            // MCP controls summarise like any MCP call.
+            ToolCatalog::McpResourceList(_)
+            | ToolCatalog::McpResourceTemplates(_)
+            | ToolCatalog::McpResourceRead(_)
+            | ToolCatalog::McpResourceSubscribe(_)
+            | ToolCatalog::McpResourceUnsubscribe(_)
+            | ToolCatalog::McpPromptList(_)
+            | ToolCatalog::McpPromptGet(_) => {
+                Some(SummaryTool::Mcp { name: call.name.to_string() })
+            }
         };
     }
 

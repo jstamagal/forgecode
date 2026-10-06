@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 use derive_setters::Setters;
 
 use crate::{
-    ArcSender, ChatResponse, ConversationId, Metrics, SharedLedger, TitleFormat, Todo, TodoItem,
+    ArcSender, ChatResponse, ConversationId, Metrics, SharedLedger, SharedSurface,
+    SharedSurfaceState, TitleFormat, Todo, TodoItem,
 };
 
 /// Provides additional context for tool calls.
@@ -23,6 +24,10 @@ pub struct ToolCallContext {
     /// How many `task` levels deep the conversation runs (0 = the user's own).
     #[setters(skip)]
     task_depth: usize,
+    /// The tool surface of the current request (catalog for
+    /// `tool_discovery`).
+    #[setters(skip)]
+    surface: SharedSurface,
 }
 
 impl ToolCallContext {
@@ -35,7 +40,27 @@ impl ToolCallContext {
             call_id: None,
             vision: false,
             task_depth: 0,
+            surface: SharedSurface::default(),
         }
+    }
+
+    /// Binds the context to the request's tool surface.
+    pub fn with_surface(mut self, surface: SharedSurface) -> Self {
+        self.surface = surface;
+        self
+    }
+
+    /// The request's tool surface.
+    pub fn surface(&self) -> &SharedSurface {
+        &self.surface
+    }
+
+    /// The conversation's surface state (loaded tools, offered skills).
+    ///
+    /// # Errors
+    /// Returns an error if the metrics lock cannot be acquired.
+    pub fn surface_state(&self) -> anyhow::Result<SharedSurfaceState> {
+        self.with_metrics(|metrics| metrics.surface.clone())
     }
 
     /// Sets the `task` nesting depth of the conversation.
