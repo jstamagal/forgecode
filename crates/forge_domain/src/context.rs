@@ -903,9 +903,9 @@ mod tests {
     #[test]
     fn test_token_count_approx_includes_tool_definitions() {
         let fixture = Context::default().add_message(ContextMessage::system("abcd"));
-        let with_tools = fixture
-            .clone()
-            .tools(vec![crate::ToolDefinition::new("read").description("x".repeat(400))]);
+        let with_tools = fixture.clone().tools(vec![
+            crate::ToolDefinition::new("read").description("x".repeat(400)),
+        ]);
 
         let actual = with_tools.token_count_approx() - fixture.token_count_approx();
 
