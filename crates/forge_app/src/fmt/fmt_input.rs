@@ -111,14 +111,28 @@ impl FormatContent for ToolCatalog {
                 let display_path = display_path_for(&input.path);
                 Some(TitleFormat::debug("Undo").sub_title(display_path).into())
             }
-            ToolCatalog::Shell(input) => Some(
-                TitleFormat::debug(format!("Execute [{}]", env.shell))
-                    .sub_title(&input.command)
+            ToolCatalog::Shell(input) => Some(match input.action {
+                forge_domain::ShellAction::Run => {
+                    TitleFormat::debug(format!("Execute [{}]", env.shell))
+                        .sub_title(&input.command)
+                        .into()
+                }
+                action => TitleFormat::debug(match action {
+                    forge_domain::ShellAction::Poll => "Shell poll",
+                    forge_domain::ShellAction::Wait => "Shell wait",
+                    _ => "Shell kill",
+                })
+                .sub_title(format!(
+                    "handle {}",
+                    input.handle.as_deref().unwrap_or("latest")
+                ))
+                .into(),
+            }),
+            ToolCatalog::Fetch(input) => Some(
+                TitleFormat::debug(input.method())
+                    .sub_title(&input.url)
                     .into(),
             ),
-            ToolCatalog::Fetch(input) => {
-                Some(TitleFormat::debug("GET").sub_title(&input.url).into())
-            }
             ToolCatalog::Plan(_) => None,
             ToolCatalog::Skill(input) => Some(
                 TitleFormat::debug("Skill")
