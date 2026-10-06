@@ -160,6 +160,7 @@ expression: tools
       "nullable": true
     }
   },
+  "additionalProperties": false,
   "required": [
     "pattern"
   ]
@@ -282,6 +283,7 @@ expression: tools
       "type": "boolean"
     }
   },
+  "additionalProperties": false,
   "required": [
     "command"
   ]
@@ -300,6 +302,7 @@ expression: tools
       "type": "string"
     }
   },
+  "additionalProperties": false,
   "required": [
     "url"
   ]
@@ -320,6 +323,7 @@ expression: tools
       "type": "string"
     }
   },
+  "additionalProperties": false,
   "required": [
     "plan_name",
     "version",
@@ -334,6 +338,7 @@ expression: tools
       "type": "string"
     }
   },
+  "additionalProperties": false,
   "required": [
     "name"
   ]
@@ -363,6 +368,7 @@ expression: tools
             ]
           }
         },
+        "additionalProperties": false,
         "required": [
           "content",
           "status"
@@ -370,6 +376,7 @@ expression: tools
       }
     }
   },
+  "additionalProperties": false,
   "required": [
     "todos"
   ]
@@ -398,6 +405,7 @@ expression: tools
       }
     }
   },
+  "additionalProperties": false,
   "required": [
     "tasks",
     "agent_id"

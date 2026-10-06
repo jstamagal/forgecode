@@ -231,6 +231,7 @@ mod tests {
                         value: "Agent result".to_string(),
                         conversation_id: agent_conv_id_1,
                     }],
+                    uncounted: false,
                 }),
             )))
             .add_message(ContextMessage::assistant("Continuing", None, None, None))
@@ -241,6 +242,7 @@ mod tests {
                         value: "Another agent result".to_string(),
                         conversation_id: agent_conv_id_2,
                     }],
+                    uncounted: false,
                 })),
             ));
 
@@ -268,6 +270,7 @@ mod tests {
                         value: "Agent result".to_string(),
                         conversation_id: agent_conv_id,
                     }],
+                    uncounted: false,
                 }),
             )))
             .add_message(ContextMessage::Tool(

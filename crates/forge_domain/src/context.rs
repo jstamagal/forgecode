@@ -63,7 +63,11 @@ fn filter_base64_images_from_tool_output(output: &ToolOutput) -> ToolOutput {
         })
         .collect();
 
-    ToolOutput { is_error: output.is_error, values: filtered_values }
+    ToolOutput {
+        is_error: output.is_error,
+        values: filtered_values,
+        uncounted: false,
+    }
 }
 
 impl ContextMessage {
@@ -916,6 +920,7 @@ mod tests {
                     output: crate::ToolOutput {
                         values: vec![crate::ToolValue::Empty],
                         is_error: false,
+                        uncounted: false,
                     },
                 },
             ]);
@@ -958,6 +963,7 @@ mod tests {
                     crate::ToolValue::Image(image2),
                 ],
                 is_error: false,
+                uncounted: false,
             },
         }]);
 
@@ -1020,6 +1026,7 @@ mod tests {
                         crate::ToolValue::Empty,
                     ],
                     is_error: false,
+                    uncounted: false,
                 },
             }]);
 
@@ -1038,6 +1045,7 @@ mod tests {
             output: crate::ToolOutput {
                 values: vec![crate::ToolValue::Image(image)],
                 is_error: true,
+                uncounted: false,
             },
         }]);
 

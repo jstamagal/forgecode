@@ -168,8 +168,9 @@ pub struct ForgeConfig {
     /// Maximum image file size in bytes permitted for read operations.
     #[serde(default)]
     pub max_image_size_bytes: u64,
-    /// Maximum time in seconds a single tool call may run before being
-    /// cancelled.
+    /// Backstop in seconds for a tool call that does not bound its own run
+    /// time (default 600); 0 disables it. Tools with their own window or
+    /// timeout are not subject to it.
     #[serde(default)]
     pub tool_timeout_secs: u64,
     /// Whether to automatically open HTML dump files in the browser after

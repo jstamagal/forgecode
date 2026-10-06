@@ -531,9 +531,21 @@ impl McpClientInfra for ForgeMcpClient {
         self.attempt_with_retry(|| self.list()).await
     }
 
+    /// Calls a tool once, bounded by the server's `timeout` (default 300 s).
+    /// A `tools/call` is never retried: the server may already have acted on
+    /// it.
     async fn call(&self, tool_name: &ToolName, input: Value) -> anyhow::Result<ToolOutput> {
-        self.attempt_with_retry(|| self.call(tool_name, &input))
-            .await
+        let secs = match &self.config {
+            McpServerConfig::Stdio(server) => server.timeout,
+            McpServerConfig::Http(server) => server.timeout,
+        }
+        .unwrap_or(300);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(secs),
+            self.call(tool_name, &input),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("MCP tool {tool_name} timed out after {secs} seconds"))?
     }
 }
 

@@ -328,7 +328,7 @@
       "default": false
     },
     "tool_timeout_secs": {
-      "description": "Maximum time in seconds a single tool call may run before being\ncancelled.",
+      "description": "Backstop in seconds for a tool call that does not bound its own run\ntime (default 600); 0 disables it. Tools with their own window or\ntimeout are not subject to it.",
       "type": "integer",
       "format": "uint64",
       "default": 0,

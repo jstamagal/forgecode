@@ -457,7 +457,11 @@ impl TryFrom<ToolOutputRecord> for forge_domain::ToolOutput {
 
     fn try_from(record: ToolOutputRecord) -> anyhow::Result<Self> {
         let values: Result<Vec<_>, _> = record.values.into_iter().map(TryInto::try_into).collect();
-        Ok(forge_domain::ToolOutput { is_error: record.is_error, values: values? })
+        Ok(forge_domain::ToolOutput {
+            is_error: record.is_error,
+            values: values?,
+            uncounted: false,
+        })
     }
 }
 

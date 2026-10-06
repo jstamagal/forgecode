@@ -792,6 +792,21 @@ fn normalize_tool_name(name: &ToolName) -> ToolName {
         .unwrap_or_else(|| ToolName::new(trimmed))
 }
 
+/// Sets `additionalProperties: false` on every object schema that declares
+/// `properties` and does not already say otherwise.
+fn close_object_schemas(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.contains_key("properties") && !map.contains_key("additionalProperties") {
+                map.insert("additionalProperties".to_string(), false.into());
+            }
+            map.values_mut().for_each(close_object_schemas);
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(close_object_schemas),
+        _ => {}
+    }
+}
+
 impl ToolCatalog {
     pub fn schema(&self) -> Schema {
         use schemars::generate::SchemaSettings;
@@ -824,7 +839,22 @@ impl ToolCatalog {
         // Apply transform to add nullable property and remove null from type
         AddNullable::default().transform(&mut schema);
 
+        // X2: every native tool schema is closed. Serde aliases (`path`,
+        // `search`, `content`, rg flags) stay out of the schema; the executor
+        // validates against it before deserialising.
+        if let Some(root) = schema.as_object_mut() {
+            if root.contains_key("properties") && !root.contains_key("additionalProperties") {
+                root.insert("additionalProperties".to_string(), false.into());
+            }
+            root.values_mut().for_each(close_object_schemas);
+        }
+
         schema
+    }
+
+    /// Tool definitions of every native tool.
+    pub fn iter_definitions() -> Vec<ToolDefinition> {
+        ToolCatalog::iter().map(|tool| tool.definition()).collect()
     }
 
     pub fn definition(&self) -> ToolDefinition {
@@ -843,6 +873,26 @@ impl ToolCatalog {
         [ToolKind::Shell]
             .iter()
             .any(|v| v.to_string().to_case(Case::Snake).eq(normalized.as_str()))
+    }
+
+    /// X6: whether this call writes nothing, so it may run in parallel with
+    /// other read-only calls. Anything that mutates files, runs processes or
+    /// changes session state is a barrier.
+    pub fn is_read_only(&self) -> bool {
+        matches!(
+            self,
+            ToolCatalog::Read(_)
+                | ToolCatalog::FsSearch(_)
+                | ToolCatalog::Fetch(_)
+                | ToolCatalog::Skill(_)
+                | ToolCatalog::TodoRead(_)
+        )
+    }
+
+    /// X7: whether the tool bounds its own run time (window, timeout or
+    /// protocol limit), so the executor's blanket backstop does not apply.
+    pub fn has_own_timeout(&self) -> bool {
+        matches!(self, ToolCatalog::Task(_))
     }
 
     /// Convert a tool input to its corresponding domain operation for policy

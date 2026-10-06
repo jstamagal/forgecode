@@ -51,11 +51,17 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ToolReg
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = anyhow::Result<ToolOutput>>,
     {
-        let tool_timeout = Duration::from_secs(self.services.get_config()?.tool_timeout_secs);
+        // X7: a blanket backstop for tools that do not bound their own run
+        // time. `tool_timeout_secs` (default 600) of 0 disables it.
+        let secs = self.services.get_config()?.tool_timeout_secs;
+        if secs == 0 {
+            return future().await;
+        }
+        let tool_timeout = Duration::from_secs(secs);
         timeout(tool_timeout, future())
             .await
             .context(Error::CallTimeout {
-                timeout: tool_timeout.as_secs() / 60,
+                timeout: tool_timeout.as_secs(),
                 tool_name: tool_name.clone(),
             })?
     }
@@ -167,10 +173,14 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ToolReg
                 context.clone()
             };
 
-            self.call_with_timeout(&tool_name, || {
-                self.tool_executor.execute(tool_input, &context)
-            })
-            .await
+            if tool_input.has_own_timeout() {
+                self.tool_executor.execute(tool_input, &context).await
+            } else {
+                self.call_with_timeout(&tool_name, || {
+                    self.tool_executor.execute(tool_input, &context)
+                })
+                .await
+            }
         } else if self.agent_executor.contains_tool(&input.name).await? {
             // Handle agent delegation tool calls
             let agent_input = AgentInput::try_from(&input)?;
@@ -191,9 +201,9 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ToolReg
             .collect::<anyhow::Result<Vec<_>>>()?;
             Ok(ToolOutput::from(outputs.into_iter()))
         } else if self.mcp_executor.contains_tool(&input.name).await? {
-            let output = self
-                .call_with_timeout(&tool_name, || self.mcp_executor.execute(input, context))
-                .await?;
+            // MCP calls are bounded by the protocol client's own request
+            // window; the blanket backstop does not apply (X7).
+            let output = self.mcp_executor.execute(input, context).await?;
             let text = output
                 .values
                 .iter()
@@ -229,9 +239,41 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ToolReg
             Some(id) => context.clone().with_call_id(id.as_str()),
             None => context.clone(),
         };
-        let output = self.call_inner(agent, call, &context).await;
+        let output = self
+            .call_inner(agent, call, &context)
+            .await
+            .map(|output| self.bound(output, &context));
 
         ToolResult::new(tool_name).call_id(call_id).output(output)
+    }
+
+    /// X11: spill/clip one result and narrow read coverage to what the model
+    /// receives.
+    fn bound(&self, output: ToolOutput, context: &ToolCallContext) -> ToolOutput {
+        let Ok(config) = self.services.get_config() else {
+            return output;
+        };
+        let limits = crate::result_bounds::ResultLimits {
+            inline: config.max_tool_result_inline_bytes as usize,
+            hard: config.max_tool_result_bytes as usize,
+            batch: 0,
+        };
+        let env = self.services.get_environment();
+        let original = output.as_str().map(str::to_string);
+        let bounded = crate::result_bounds::bound_result(
+            output,
+            limits,
+            &crate::result_bounds::spill_dir(&env.base_path),
+        );
+        if let (Some(original), Some(delivered), Some(call_id), Ok(ledger)) = (
+            original,
+            bounded.as_str(),
+            context.call_id(),
+            context.reads(),
+        ) {
+            crate::result_bounds::narrow_read_coverage(&ledger, call_id, &original, delivered);
+        }
+        bounded
     }
 
     pub async fn list(&self) -> anyhow::Result<Vec<ToolDefinition>> {
@@ -342,20 +384,26 @@ impl<S> ToolRegistry<S> {
     /// Validates if a tool is supported by both the agent and the system.
     ///
     /// # Validation Process
-    /// Verifies the tool is supported by the agent specified in the context
-    fn validate_tool_call(agent: &Agent, tool_name: &ToolName) -> Result<(), Error> {
+    /// Verifies the tool is supported by the agent specified in the context.
+    /// A refusal distinguishes a real tool this agent may not use from a name
+    /// that does not exist (with a "did you mean" suggestion); neither counts
+    /// toward the repeated-failure limit.
+    fn validate_tool_call(agent: &Agent, tool_name: &ToolName) -> anyhow::Result<()> {
         // Check if tool matches any pattern (supports globs like "mcp_*")
         let matches = ToolResolver::is_allowed(agent, tool_name);
         if !matches {
             tracing::error!(tool_name = %tool_name, "No tool with name");
-            let supported_tools = agent
+            let surface: Vec<&str> = agent
                 .tools
                 .iter()
                 .flatten()
                 .map(|t| t.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(Error::NotAllowed { name: tool_name.clone(), supported_tools });
+                .filter(|t| !t.contains('*'))
+                .collect();
+            let known = ToolCatalog::contains(tool_name);
+            return Err(anyhow::Error::new(forge_domain::ToolRefusal(
+                forge_domain::unavailable_message(tool_name.as_str(), &surface, known),
+            )));
         }
         Ok(())
     }
@@ -389,7 +437,6 @@ mod tests {
     };
     use pretty_assertions::assert_eq;
 
-    use crate::error::Error;
     use crate::tool_registry::{ToolRegistry, create_test_agents};
 
     fn agent() -> Agent {
@@ -416,10 +463,21 @@ mod tests {
         let error = ToolRegistry::<()>::validate_tool_call(&agent(), &ToolName::new("write"))
             .unwrap_err()
             .to_string();
-        assert_eq!(
-            error,
-            "Tool 'write' is not available. Please try again with one of these tools: [read, fs_search]"
+        assert_eq!(error, "write is not allowed by this agent's tool policy.");
+    }
+
+    #[test]
+    fn test_unknown_tool_suggests_closest_and_is_a_refusal() {
+        let error =
+            ToolRegistry::<()>::validate_tool_call(&agent(), &ToolName::new("raed")).unwrap_err();
+        let refusal = error.downcast_ref::<forge_domain::ToolRefusal>().is_some();
+        let actual = (refusal, error.to_string());
+        let expected = (
+            true,
+            "unknown tool raed. Did you mean read? This agent's tools: read, fs_search."
+                .to_string(),
         );
+        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -467,11 +525,7 @@ mod tests {
 
         let actual = ToolRegistry::<()>::validate_tool_call(&fixture, &ToolName::new("write"));
 
-        let expected = Error::NotAllowed {
-            name: ToolName::new("write"),
-            supported_tools: "mcp_*, read".to_string(),
-        }
-        .to_string();
+        let expected = "write is not allowed by this agent's tool policy.";
 
         assert_eq!(actual.unwrap_err().to_string(), expected);
     }

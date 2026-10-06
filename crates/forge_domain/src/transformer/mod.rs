@@ -74,6 +74,7 @@ where
 
 // Re-export specific transformers
 mod drop_reasoning_details;
+mod heal_orphaned_tool_calls;
 mod image_handling;
 mod normalize_tool_args;
 mod reasoning_normalizer;
@@ -82,6 +83,7 @@ mod sort_tools;
 mod transform_tool_calls;
 
 pub use drop_reasoning_details::DropReasoningDetails;
+pub use heal_orphaned_tool_calls::{HealOrphanedToolCalls, ORPHAN_RESULT};
 pub use image_handling::ImageHandling;
 pub use normalize_tool_args::NormalizeToolCallArguments;
 pub use reasoning_normalizer::ReasoningNormalizer;

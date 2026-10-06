@@ -716,6 +716,7 @@ mod tests {
                 output: ToolOutput {
                     is_error: false,
                     values: vec![ToolValue::Text("Result text".to_string()), ToolValue::Empty],
+                    uncounted: false,
                 },
             })
             .into(),
