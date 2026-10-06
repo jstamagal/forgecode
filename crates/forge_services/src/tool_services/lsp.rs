@@ -169,8 +169,11 @@ impl Server {
     /// # Errors
     /// Returns an error when the server cannot be started or initialized.
     pub async fn start(spec: &ServerSpec, root: &Path) -> anyhow::Result<Self> {
-        let mut child = tokio::process::Command::new(spec.command[0])
-            .args(&spec.command[1..])
+        // X20: the server reads the workspace, so it runs in the jail.
+        let argv =
+            forge_domain::jailed_argv(spec.command.iter().map(|s| s.to_string()).collect(), root);
+        let mut child = tokio::process::Command::new(&argv[0])
+            .args(&argv[1..])
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

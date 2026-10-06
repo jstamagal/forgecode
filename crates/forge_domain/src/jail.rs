@@ -196,6 +196,12 @@ impl Jail {
             out.push("--tmpfs".to_string());
             out.push(root.display().to_string());
         }
+        // The private directory also shows at its real path, so a socket or
+        // file forge puts there (the kernel's tool bridge) is the same path on
+        // both sides.
+        out.push("--bind".to_string());
+        out.push(self.private.display().to_string());
+        out.push(self.private.display().to_string());
 
         let mut explicit = vec![JailBind { path: self.root.clone(), rw: true }];
         explicit.extend(self.binds.iter().cloned());
@@ -251,6 +257,15 @@ impl Jail {
         out.push(cwd.display().to_string());
         out.push("--".to_string());
         out.extend(argv.iter().cloned());
+        out
+    }
+
+    /// The full argv (bwrap first) that runs `argv` in this jail, with the
+    /// process's PATH bound back.
+    pub fn wrap(&self, argv: &[String], cwd: &Path) -> Vec<String> {
+        let path_env = std::env::var("PATH").unwrap_or_default();
+        let mut out = vec![self.bwrap.display().to_string()];
+        out.extend(self.argv(argv, cwd, &path_env));
         out
     }
 
@@ -323,6 +338,16 @@ pub fn enter_jail(jail: Jail) -> anyhow::Result<()> {
 /// The active jail, if any.
 pub fn active_jail() -> Option<&'static Jail> {
     ACTIVE.get()
+}
+
+/// X20: `argv` as it must be spawned — wrapped in bwrap when a jail is
+/// active, unchanged otherwise. Every process a tool starts goes through
+/// this (or through the shell/terminal engines, which wrap the same way).
+pub fn jailed_argv(argv: Vec<String>, cwd: &Path) -> Vec<String> {
+    match active_jail() {
+        Some(jail) => jail.wrap(&argv, cwd),
+        None => argv,
+    }
 }
 
 #[cfg(test)]

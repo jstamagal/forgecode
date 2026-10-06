@@ -76,7 +76,18 @@ impl KernelProcess {
         bridge: ToolBridge,
         names: ToolNames,
     ) -> anyhow::Result<Self> {
-        let dir = tempfile::tempdir().context("could not create the kernel's socket directory")?;
+        // Under a jail the socket directory and the image directory live in
+        // the jail's private directory, which shows at the same path inside.
+        let jail = forge_domain::active_jail();
+        let dir = match jail {
+            Some(jail) => tempfile::tempdir_in(&jail.private),
+            None => tempfile::tempdir(),
+        }
+        .context("could not create the kernel's socket directory")?;
+        let image_dir = match jail {
+            Some(_) => dir.path().join("images"),
+            None => image_dir.to_path_buf(),
+        };
         let driver = dir.path().join("forge_kernel_driver.py");
         std::fs::write(&driver, DRIVER)?;
         let socket_path = dir.path().join("tools.sock");
@@ -89,11 +100,15 @@ impl KernelProcess {
             client = CLIENT,
             sock = socket_path.display().to_string(),
         );
-        let mut child = tokio::process::Command::new("python3")
-            .arg(&driver)
+        let argv = forge_domain::jailed_argv(
+            vec!["python3".to_string(), driver.display().to_string()],
+            cwd,
+        );
+        let mut child = tokio::process::Command::new(&argv[0])
+            .args(&argv[1..])
             .current_dir(cwd)
             .env("FORGE_KERNEL_SETUP", setup)
-            .env("FORGE_KERNEL_IMAGES", image_dir)
+            .env("FORGE_KERNEL_IMAGES", &image_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

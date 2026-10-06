@@ -335,6 +335,8 @@ pub fn absolutize(markdown: &str, base: &str) -> String {
     .into_owned()
 }
 
+/// Runs `argv` (in the jail under `-C`) with an optional stdin, bounded by
+/// `timeout`.
 async fn run_capped(
     argv: &[String],
     cwd: &Path,
@@ -342,6 +344,7 @@ async fn run_capped(
     input: Option<&str>,
 ) -> anyhow::Result<(i32, String, String)> {
     use tokio::io::AsyncWriteExt;
+    let argv = forge_domain::jailed_argv(argv.to_vec(), cwd);
     let mut command = tokio::process::Command::new(&argv[0]);
     command
         .args(&argv[1..])
