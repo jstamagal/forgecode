@@ -130,43 +130,7 @@ expression: actual.tools
     "parameters": {
       "additionalProperties": false,
       "properties": {
-        "-A": {
-          "anyOf": [
-            {
-              "minimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Number of lines to show after each match (rg -A). Requires output_mode:\n\"content\", ignored otherwise."
-        },
-        "-B": {
-          "anyOf": [
-            {
-              "minimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Number of lines to show before each match (rg -B). Requires output_mode:\n\"content\", ignored otherwise."
-        },
-        "-C": {
-          "anyOf": [
-            {
-              "minimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Number of lines to show before and after each match (rg -C). Requires\noutput_mode: \"content\", ignored otherwise."
-        },
-        "-i": {
+        "case_insensitive": {
           "anyOf": [
             {
               "type": "boolean"
@@ -175,18 +139,54 @@ expression: actual.tools
               "type": "null"
             }
           ],
-          "description": "Case insensitive search (rg -i)"
+          "description": "Match without case sensitivity."
         },
-        "-n": {
+        "context": {
           "anyOf": [
             {
-              "type": "boolean"
+              "minimum": 0,
+              "type": "integer"
             },
             {
               "type": "null"
             }
           ],
-          "description": "Show line numbers in output (rg -n). Requires output_mode: \"content\",\nignored otherwise."
+          "description": "Lines of context before and after each match (content mode)."
+        },
+        "context_after": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Lines of context after each match (content mode)."
+        },
+        "context_before": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Lines of context before each match (content mode)."
+        },
+        "file_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "File type, e.g. rust, py, js (ripgrep type names)."
         },
         "glob": {
           "anyOf": [
@@ -197,19 +197,30 @@ expression: actual.tools
               "type": "null"
             }
           ],
-          "description": "Glob pattern to filter files (e.g. \"*.js\", \"*.{ts,tsx}\") - maps to rg\n--glob"
+          "description": "Glob filter on paths (e.g. \"*.rs\", \"*.{ts,tsx}\", \"!*.min.js\")."
         },
         "head_limit": {
           "anyOf": [
             {
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             {
               "type": "null"
             }
           ],
-          "description": "Limit output to first N lines/entries, equivalent to \"| head -N\". Works\nacross all output modes: content (limits output lines),\nfiles_with_matches (limits file paths), count (limits count entries).\nWhen unspecified, shows all results from ripgrep."
+          "description": "Maximum result entries after `offset`."
+        },
+        "line_numbers": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Prefix content lines with their line numbers (default true)."
         },
         "multiline": {
           "anyOf": [
@@ -220,7 +231,7 @@ expression: actual.tools
               "type": "null"
             }
           ],
-          "description": "Enable multiline mode where . matches newlines and patterns can span\nlines (rg -U --multiline-dotall). Default: false."
+          "description": "Let the regex span lines (`.` matches newlines)."
         },
         "offset": {
           "anyOf": [
@@ -232,7 +243,7 @@ expression: actual.tools
               "type": "null"
             }
           ],
-          "description": "Skip first N lines/entries before applying head_limit"
+          "description": "Result entries to skip before `head_limit`."
         },
         "output_mode": {
           "anyOf": [
@@ -248,7 +259,7 @@ expression: actual.tools
               "type": "null"
             }
           ],
-          "description": "Output mode: \"content\" shows matching lines (supports -A/-B/-C context,\n-n line numbers, head_limit), \"files_with_matches\" shows file paths\n(supports head_limit), \"count\" shows match counts (supports head_limit).\nDefaults to \"files_with_matches\"."
+          "description": "\"content\" (matching lines), \"files_with_matches\" (paths, default) or\n\"count\" (matches per file)."
         },
         "path": {
           "anyOf": [
@@ -259,13 +270,45 @@ expression: actual.tools
               "type": "null"
             }
           ],
-          "description": "File or directory to search in (rg PATH). Defaults to current working\ndirectory."
+          "description": "File or directory to search (default: the current directory)."
         },
         "pattern": {
-          "description": "The regular expression pattern to search for in file contents.",
+          "description": "Regex to search file contents for.",
           "type": "string"
+        }
+      },
+      "required": [
+        "case_insensitive",
+        "context",
+        "context_after",
+        "context_before",
+        "file_type",
+        "glob",
+        "head_limit",
+        "line_numbers",
+        "multiline",
+        "offset",
+        "output_mode",
+        "path",
+        "pattern"
+      ],
+      "type": "object"
+    },
+    "strict": true,
+    "description": "Search file contents by regex. `output_mode` is `files_with_matches` (paths, the default), `content` (matching lines as `path:line:text`, context lines as `path-line-text`, `--` between groups) or `count` (`path:N`).\n- The search uses ripgrep's libraries in-process. Paths ignored by `.gitignore`/`.ignore` are skipped, as are hidden paths unless `path` names one or `glob` names a dot-leading component such as `.github/**`; binary files are skipped.\n- `glob` filters paths (a leading `!` excludes); `file_type` takes ripgrep type names (`rust`, `py`, `js`, …) or a bare extension, and cannot be combined with a positive `glob`.\n- Regex syntax is ripgrep's: escape literal braces (`interface\\{\\}`); `multiline: true` lets a pattern span lines.\n- Results are absolute paths in path order. Bytes that are not valid UTF-8 are shown as `\\xNN`.\n- The walk stays on the filesystem `path` is on and does not enter mount points below it; name a mounted share as `path` to search it. A search is bounded at 120 seconds.\n- `head_limit` and `offset` page through a large result; the result names the next `offset` when there are more. A result too large to show inline is written to a file whose path the result names.\n- Use `{{tool_names.read}}` to see a file once a search has found it, and `{{tool_names.task}}` for open-ended investigations that need several rounds of search and reading."
+  },
+  {
+    "type": "function",
+    "name": "ast_search",
+    "parameters": {
+      "additionalProperties": false,
+      "description": "Input for the `ast_search` tool: structural search and rewrite.",
+      "properties": {
+        "apply": {
+          "description": "Write the rewrite (default false).",
+          "type": "boolean"
         },
-        "type": {
+        "language": {
           "anyOf": [
             {
               "type": "string"
@@ -274,28 +317,59 @@ expression: actual.tools
               "type": "null"
             }
           ],
-          "description": "File type to search (rg --type). Common types: js, py, rust, go, java,\netc. More efficient than include for standard file types."
+          "description": "Language (e.g. rust, python, typescript, tsx, go, c, cpp); inferred\nfrom each file's extension when omitted."
+        },
+        "max_results": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Most matches reported (default 200); an apply with more matches is\nrefused."
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "File or directory to search (default: the current directory)."
+        },
+        "pattern": {
+          "description": "ast-grep pattern; `$NAME` matches one node, `$$$NAME` zero or more.",
+          "type": "string"
+        },
+        "rewrite": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Replacement template using the pattern's metavariables; without\n`apply` the result is a diff and nothing is written."
         }
       },
       "required": [
-        "-A",
-        "-B",
-        "-C",
-        "-i",
-        "-n",
-        "glob",
-        "head_limit",
-        "multiline",
-        "offset",
-        "output_mode",
+        "apply",
+        "language",
+        "max_results",
         "path",
         "pattern",
-        "type"
+        "rewrite"
       ],
       "type": "object"
     },
     "strict": true,
-    "description": "A powerful search tool built on ripgrep\n\nUsage:\n- ALWAYS use `{{tool_names.fs_search}}` for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The `{{tool_names.fs_search}}` tool has been optimized for correct permissions and access.\n- Supports full regex syntax (e.g., \"log.*Error\", \"function\\\\s+\\\\w+\")\n- Filter files with glob parameter (e.g., \"*.js\", \"**/*.tsx\") or type parameter (e.g., \"js\", \"py\", \"rust\")\n- Output modes: \"content\" shows matching lines, \"files_with_matches\" shows only file paths (default), \"count\" shows match counts\n- Use Task tool for open-ended searches requiring multiple rounds\n- Pattern syntax: Uses ripgrep (not grep) - literal braces need escaping (use `interface\\\\{\\\\}` to find `interface{}` in Go code)\n- Multiline matching: By default patterns match within single lines only. For cross-line patterns like `struct \\\\{[\\\\s\\\\S]*?field`, use `multiline: true`"
+    "description": "Search code structurally with ast-grep (in-process, tree-sitter grammars). Patterns match parsed syntax, so they span whitespace and line breaks and never match inside comments or strings. Use `{{tool_names.fs_search}}` for plain text, regex and filenames.\n- In a pattern `$NAME` matches one syntax node and `$$$NAME` matches zero or more; metavariables are uppercase, and reusing one requires equal captures.\n- The language is inferred from each file's extension; set `language` to restrict the search to one language. Under `language=\"c\"` a bare call pattern like `call($A)` matches nothing, because tree-sitter-c parses that fragment as a type; write it as an expression statement (`call($A);`).\n- Matches come back as an absolute `path:line` heading, the numbered source lines (`12|code`), and the metavariable captures. When more matches exist than `max_results` (default 200), the extra ones are dropped and the result says so.\n- The walk skips paths ignored by `.gitignore` and hidden paths.\n- Rewrites are two-step: `rewrite` alone is a dry run that shows a unified diff and changes nothing; `apply=true` writes it and is refused when there are more matches than `max_results`. An applied rewrite snapshots every changed file for `{{tool_names.undo}}`."
   },
   {
     "type": "function",
@@ -432,8 +506,42 @@ expression: actual.tools
     "parameters": {
       "additionalProperties": false,
       "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "description": "Start `command` and wait up to `timeout` seconds for it.",
+              "enum": [
+                "run"
+              ],
+              "type": "string"
+            },
+            {
+              "description": "Report a running job's new output without waiting.",
+              "enum": [
+                "poll"
+              ],
+              "type": "string"
+            },
+            {
+              "description": "Wait up to `timeout` more seconds for a running job.",
+              "enum": [
+                "wait"
+              ],
+              "type": "string"
+            },
+            {
+              "description": "Stop a running job (SIGTERM, then SIGKILL, to its process group).",
+              "enum": [
+                "kill"
+              ],
+              "type": "string"
+            }
+          ],
+          "description": "run (default), poll, wait or kill."
+        },
         "command": {
-          "description": "The shell command to execute.",
+          "default": "",
+          "description": "The command to run (required for action \"run\").",
           "type": "string"
         },
         "cwd": {
@@ -445,7 +553,7 @@ expression: actual.tools
               "type": "null"
             }
           ],
-          "description": "The working directory where the command should be executed.\nIf not specified, defaults to the current working directory from the\nenvironment."
+          "description": "Working directory for the command (default: the current directory)."
         },
         "description": {
           "anyOf": [
@@ -456,7 +564,7 @@ expression: actual.tools
               "type": "null"
             }
           ],
-          "description": "Clear, concise description of what this command does. Recommended to be\n5-10 words for simple commands. For complex commands with pipes or\nmultiple operations, provide more context. Examples: \"Lists files in\ncurrent directory\", \"Installs package dependencies\", \"Compiles Rust\nproject with release optimizations\"."
+          "description": "Short description of what the command does."
         },
         "env": {
           "anyOf": [
@@ -470,24 +578,50 @@ expression: actual.tools
               "type": "null"
             }
           ],
-          "description": "Environment variable names to pass to command execution (e.g., [\"PATH\",\n\"HOME\", \"USER\"]). The system automatically reads the specified\nvalues and applies them during command execution."
+          "description": "Extra environment variable names to pass through, on top of the\nconfigured allow-list."
+        },
+        "handle": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Job id from a `HANDLE n RUNNING` line, for poll/wait/kill (default:\nthe most recent running job)."
         },
         "keep_ansi": {
-          "description": "Whether to preserve ANSI escape codes in the output.\nIf true, ANSI escape codes will be preserved in the output.\nIf false (default), ANSI escape codes will be stripped from the output.",
+          "description": "Keep ANSI escape codes in the output (default false).",
           "type": "boolean"
+        },
+        "timeout": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Seconds to wait before returning a handle (run) or to keep waiting\n(wait); default 30. The command is never killed when the window ends."
         }
       },
       "required": [
+        "action",
         "command",
         "cwd",
         "description",
         "env",
-        "keep_ansi"
+        "handle",
+        "keep_ansi",
+        "timeout"
       ],
       "type": "object"
     },
     "strict": true,
-    "description": "Executes shell commands. The `cwd` parameter sets the working directory for command execution. If not specified, defaults to `{{env.cwd}}`.\n\nCRITICAL: Do NOT use `cd` commands in the command string. This is FORBIDDEN. Always use the `cwd` parameter to set the working directory instead. Any use of `cd` in the command is redundant, incorrect, and violates the tool contract.\n\nIMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.\n\nBefore executing the command, please follow these steps:\n\n1. Directory Verification:\n   - If the command will create new directories or files, first use `shell` with `ls` to verify the parent directory exists and is the correct location\n   - For example, before running \"mkdir foo/bar\", first use `ls foo` to check that \"foo\" exists and is the intended parent directory\n\n2. Command Execution:\n   - Always quote file paths that contain spaces with double quotes (e.g., python \"path with spaces/script.py\")\n   - Examples of proper quoting:\n     - mkdir \"/Users/name/My Documents\" (correct)\n     - mkdir /Users/name/My Documents (incorrect - will fail)\n     - python \"/path/with spaces/script.py\" (correct)\n     - python /path/with spaces/script.py (incorrect - will fail)\n   - After ensuring proper quoting, execute the command.\n   - Capture the output of the command.\n\nUsage notes:\n  - The command argument is required.\n  - It is very helpful if you write a clear, concise description of what this command does in 5-10 words.\n  - If the output exceeds {{config.stdoutMaxPrefixLength}} prefix lines or {{config.stdoutMaxSuffixLength}} suffix lines, or if a line exceeds {{config.stdoutMaxLineLength}} characters, it will be truncated and the full output will be written to a temporary file. You can use read with start_line/end_line to read specific sections or fs_search to search the full content. Because of this, you should NOT use `head`, `tail`, or other truncation commands to limit output - just run the command directly.\n  - Do not use {{tool_names.shell}} with the `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands, unless explicitly instructed or when these commands are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands:\n    - File search: Use `{{tool_names.fs_search}}` (NOT find or ls)\n    - Content search: Use `{{tool_names.fs_search}}` with regex (NOT grep or rg)\n    - Read files: Use `{{tool_names.read}}` (NOT cat/head/tail)\n    - Edit files: Use `{{tool_names.patch}}`(NOT sed/awk)\n    - Write files: Use `{{tool_names.write}}` (NOT echo >/cat <<EOF)\n    - Communication: Output text directly (NOT echo/printf)\n  - When issuing multiple commands:\n    - If the commands are independent and can run in parallel, make multiple `{{tool_names.shell}}` tool calls in a single message. For example, if you need to run \"git status\" and \"git diff\", send a single message with two `{{tool_names.shell}}` tool calls in parallel.\n    - If the commands depend on each other and must run sequentially, use a single `{{tool_names.shell}}` call with '&&' to chain them together (e.g., `git add . && git commit -m \"message\" && git push`). For instance, if one operation must complete before another starts (like mkdir before cp, write before shell for git operations, or git add before git commit), run these operations sequentially instead.\n    - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail\n    - DO NOT use newlines to separate commands (newlines are ok in quoted strings)\n  - DO NOT use `cd <directory> && <command>`. Use the `cwd` parameter to change directories instead.\n\nGood examples:\n  - With explicit cwd: cwd=\"/foo/bar\" with command: pytest tests\n\nBad example:\n  cd /foo/bar && pytest tests\n\nReturns complete output including stdout, stderr, and exit code for diagnostic purposes."
+    "description": "Run one command with `{{env.shell}}` and return its exit code, stdout and stderr. Under bash and zsh a pipeline fails when any stage fails (`pipefail`), so `false | cat` reports exit 1. The working directory is `cwd`, default `{{env.cwd}}`; set `cwd` instead of using `cd`.\n\nLong output comes back as its head and its tail, with a marker between them naming the bytes left out and the file that holds the whole stream:\n\n    [truncated: output budget (… bytes) reached; stdout bytes 25000-980000 of 1004000 (955000 bytes) are not shown; the whole stdout is at /path/shell-3-….log — read it on with range {\"start_byte\": 25000}]\n\nRead any part of that file with `{{tool_names.read}}` and a byte range, so do not pipe through `head` or `tail` just to shrink the output. Stdin is `/dev/null` and there is no terminal: a command that reads input gets end-of-file, and a password or confirmation prompt gets no answer.\n\nA command does not have to finish before you get an answer. The call waits `timeout` seconds (default 30); a command that finishes inside that window comes back whole, and one still running comes back as a handle with whatever it has printed so far:\n\n    command still running after 30s (handle 3, pid 4242). ...\n    HANDLE 3 RUNNING\n\nThe command is never killed by the wait. Then `action=\"poll\", handle=\"3\"` returns new output and whether it is still running, `action=\"wait\", handle=\"3\", timeout=N` blocks up to N more seconds, and `action=\"kill\", handle=\"3\"` stops it (SIGTERM, then SIGKILL, to its whole process group). `handle` defaults to the most recent running job. Do a poll before assuming a long build or test run has failed. Interrupting the turn kills a command the call is still waiting on.\n\nThe command gets a filtered environment: the configured allow-list (by default PATH, HOME, USER, LANG, LC_ALL, TERM, PWD, SHELL) plus the names you list in `env`. When the command references a variable that was filtered out, the result says so.\n\n- Independent commands can go in parallel calls in one response; chain dependent ones with `&&` in one call.\n- Search with `{{tool_names.fs_search}}`, not `grep`, `rg`, or `find`.\n- Read files with `{{tool_names.read}}`, not `cat`, `head`, or `tail`.\n- Edit files with `{{tool_names.patch}}`, not `sed` or `awk`.\n- Write files with `{{tool_names.write}}`, not redirects or heredocs.\n- Delete with `{{tool_names.remove}}`, not `rm`."
   },
   {
     "type": "function",
@@ -496,30 +630,52 @@ expression: actual.tools
       "additionalProperties": false,
       "description": "Input type for the net fetch tool",
       "properties": {
+        "body": {
+          "description": "Request body text.",
+          "nullable": true,
+          "type": "string"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Request headers, name to value.",
+          "nullable": true,
+          "type": "object"
+        },
+        "json_body": {
+          "additionalProperties": true,
+          "description": "Request body as JSON (sets Content-Type: application/json); not with\n`body`.",
+          "nullable": true,
+          "type": "object"
+        },
+        "method": {
+          "description": "HTTP method (default GET).",
+          "nullable": true,
+          "type": "string"
+        },
         "raw": {
-          "anyOf": [
-            {
-              "type": "boolean"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Get raw content without any markdown conversion (default: false)"
+          "description": "Return the body as is, without HTML-to-markdown conversion (default\nfalse).",
+          "nullable": true,
+          "type": "boolean"
+        },
+        "save": {
+          "description": "Stream the response body to this path instead of returning it; no size\nlimit, resumable.",
+          "nullable": true,
+          "type": "string"
         },
         "url": {
-          "description": "URL to fetch",
+          "description": "URL to fetch: http(s):// or file://.",
           "type": "string"
         }
       },
       "required": [
-        "raw",
         "url"
       ],
       "type": "object"
     },
-    "strict": true,
-    "description": "Retrieves content from URLs as markdown or raw text. Enables access to current online information including websites, APIs and documentation. Use for obtaining up-to-date information beyond training data, verifying facts, or retrieving specific online content. Handles HTTP/HTTPS and converts HTML to readable markdown by default. Cannot access private/restricted resources requiring authentication. Respects robots.txt and may be blocked by anti-scraping measures. For large pages, returns the first 40,000 characters and stores the complete content in a temporary file for subsequent access.\n\nIMPORTANT: This tool only handles text-based content (HTML, JSON, XML, plain text, etc.). It will reject binary file downloads (.tar.gz, .zip, .bin, .deb, images, audio, video, etc.) with an error. To download binary files, use the `shell` tool with `curl -fLo <output_file> <url>` instead."
+    "strict": false,
+    "description": "Fetch a URL over HTTP(S) or `file://`.\n\nHTML comes back as markdown with links made absolute, so you can fetch them as-is; `raw=true` returns the source instead. `method`, `headers`, `body` and `json_body` make any HTTP request (a GET that saves nothing checks robots.txt first). `save` streams the body to that path instead of returning it, with no size limit; a partial download left by an interrupted save resumes with a Range request, and the previous file at that path can be brought back with `{{tool_names.undo}}`. Binary responses come back as a short descriptor naming the type and size; pass `save` to get the bytes. Images come back as images when the model accepts image input. Unsaved responses are read up to 32 MiB and bounded by a 30-second timeout; a large text result is written to a file whose path and continuation range the result names."
   },
   {
     "type": "function",
@@ -632,9 +788,69 @@ expression: actual.tools
       "additionalProperties": false,
       "description": "Input structure for the Task tool - delegates work to specialized agents",
       "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "description": "Start `command` and wait up to `timeout` seconds for it.",
+              "enum": [
+                "run"
+              ],
+              "type": "string"
+            },
+            {
+              "description": "Report a running job's new output without waiting.",
+              "enum": [
+                "poll"
+              ],
+              "type": "string"
+            },
+            {
+              "description": "Wait up to `timeout` more seconds for a running job.",
+              "enum": [
+                "wait"
+              ],
+              "type": "string"
+            },
+            {
+              "description": "Stop a running job (SIGTERM, then SIGKILL, to its process group).",
+              "enum": [
+                "kill"
+              ],
+              "type": "string"
+            }
+          ],
+          "description": "run (default), poll, wait or kill; poll/wait/kill act on a background\ntask's handle."
+        },
         "agent_id": {
-          "description": "The ID of the specialized agent to delegate to (e.g., \"forge\", \"muse\",\n\"sage\")",
+          "default": "",
+          "description": "The agent the workers run as (required to start workers).",
           "type": "string"
+        },
+        "background": {
+          "description": "Run the workers in the background and return a handle at once.",
+          "type": "boolean"
+        },
+        "handle": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Handle of a background task (default: your most recent running one)."
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Model the workers run on instead of the agent's configured model. Leave\nunset unless the user asks for it."
         },
         "session_id": {
           "anyOf": [
@@ -645,24 +861,42 @@ expression: actual.tools
               "type": "null"
             }
           ],
-          "description": "Optional session ID to continue an existing agent session. If not\nprovided, a new stateless session will be created. Use this to\nmaintain context across multiple task invocations with the same\nagent."
+          "description": "Resume an earlier worker session (one task only). An unknown id is an\nerror."
         },
         "tasks": {
-          "description": "A list of clear and detailed descriptions of the tasks to be performed\nby the agent in parallel. Provide sufficient context and specific\nrequirements to enable the agent to understand and execute the work\naccurately.",
+          "default": [],
+          "description": "Self-contained prompts, one per worker; they run in parallel (required\nto start workers).",
           "items": {
             "type": "string"
           },
           "type": "array"
+        },
+        "timeout": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Seconds a wait blocks (default: until the task ends)."
         }
       },
       "required": [
+        "action",
         "agent_id",
+        "background",
+        "handle",
+        "model",
         "session_id",
-        "tasks"
+        "tasks",
+        "timeout"
       ],
       "type": "object"
     },
     "strict": true,
-    "description": "Launch a new agent to handle complex, multi-step tasks autonomously. \n\nThe {{tool_names.task}} tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.\n\nAvailable agent types and the tools they have access to:\n{{#each agents}}\n- **{{id}}**{{#if description}}: {{description}}{{/if}}{{#if tools}}\n  - Tools: {{#each tools}}{{this}}{{#unless @last}}, {{/unless}}{{/each}}{{/if}}\n{{/each}}\n\nWhen using the {{tool_names.task}} tool, you must specify a agent_id parameter to select which agent type to use.\n\nWhen NOT to use the {{tool_names.task}} tool:\n- If you want to read a specific file path, use the {{tool_names.read}} or {{tool_names.fs_search}} tool instead of the {{tool_names.task}} tool, to find the match more quickly\n- If you are searching for a specific class definition like \"class Foo\", use the {{tool_names.fs_search}} tool instead, to find the match more quickly\n- If you are searching for code within a specific file or set of 2-3 files, use the {{tool_names.read}} tool instead of the {{tool_names.task}} tool, to find the match more quickly\n- Other tasks that are not related to the agent descriptions above\n\n\nUsage notes:\n- Always include a short description (3-5 words) summarizing what the agent will do\n- Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses\n- When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.\n- Agents can be resumed using the \\`session_id\\` parameter by passing the agent ID from a previous invocation. When resumed, the agent continues with its full previous context preserved. When NOT resuming, each invocation starts fresh and you should provide a detailed task description with all necessary context.\n- When the agent is done, it will return a single message back to you along with its agent ID. You can use this ID to resume the agent later if needed for follow-up work.\n- Provide clear, detailed prompts so the agent can work autonomously and return exactly the information you need.\n- Agents with \"access to current context\" can see the full conversation history before the tool call. When using these agents, you can write concise prompts that reference earlier context (e.g., \"investigate the error discussed above\") instead of repeating information. The agent will receive all prior messages and understand the context.\n- The agent's outputs should generally be trusted\n- Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent\n- If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.\n- If the user specifies that they want you to run agents \"in parallel\", you MUST send a single message with multiple {{tool_names.task}} tool use content blocks. For example, if you need to launch both a build-validator agent and a test-runner agent in parallel, send a single message with both tool calls.\n\nExample usage:\n\n<example_agent_descriptions>\n\"test-runner\": use this agent after you are done writing code to run tests\n\"greeting-responder\": use this agent when to respond to user greetings with a friendly joke\n</example_agent_description>\n\n<example>\nuser: \"Please write a function that checks if a number is prime\"\nassistant: Sure let me write a function that checks if a number is prime\nassistant: First let me use the {{tool_names.write}} tool to write a function that checks if a number is prime\nassistant: I'm going to use the {{tool_names.write}} tool to write the following code:\n<code>\nfunction isPrime(n) {\n  if (n <= 1) return false\n  for (let i = 2; i * i <= n; i++) {\n    if (n % i === 0) return false\n  }\n  return true\n}\n</code>\n<commentary>\nSince a significant piece of code was written and the task was completed, now use the test-runner agent to run the tests\n</commentary>\nassistant: Now let me use the test-runner agent to run the tests\nassistant: Uses the {{tool_names.task}} tool to launch the test-runner agent\n</example>\n\n<example>\nuser: \"Hello\"\n<commentary>\nSince the user is greeting, use the greeting-responder agent to respond with a friendly joke\n</commentary>\nassistant: \"I'm going to use the {{tool_names.task}} tool to launch the greeting-responder agent\"\n</example>"
+    "description": "Launch one or more worker agents for complex, multi-step work. Each worker runs autonomously in its own conversation and returns one result to you; the result is not shown to the user, so summarize it in your reply.\n\nAvailable agents and their tools:\n{{#each agents}}\n- **{{id}}**{{#if description}}: {{description}}{{/if}}{{#if tools}}\n  - Tools: {{#each tools}}{{this}}{{#unless @last}}, {{/unless}}{{/each}}{{/if}}\n{{/each}}\n\nWhen to use: open-ended searches that need several search/read rounds, independent investigations that can run concurrently, work that suits another agent's persona and tools.\nWhen not to use: reading one known file or two or three files (use `{{tool_names.read}}`), searching for an exact identifier or definition (use `{{tool_names.fs_search}}`), anything one or two direct tool calls finish.\n\nInputs:\n- `tasks` (required to start workers): one self-contained prompt per worker. A fresh worker cannot see this conversation; include paths, error text, constraints, the expected output shape, and whether it may change code.\n- `agent_id` (required to start workers): the agent the workers run as. An unknown agent is an error and no worker starts.\n- `session_id`: resume a worker session (the id is named in an earlier result as `session_id=…`). It runs exactly one task; an unknown id is an error.\n- `model`: run the workers on another model. Leave it unset unless the user asks for it.\n\nParallelism: the tasks of one call run concurrently through a bounded worker pool, and several `{{tool_names.task}}` calls in one response also run concurrently. One task returns the worker's reply verbatim; several come back numbered under a `TASK_RESULTS` header in task order. A worker that fails reports its error in its own slot without discarding the others. Each reply is held to an equal share of the result budget. Workers that start their own tasks run one level deeper; past the configured depth limit a call is refused.\n\nBackground: a call blocks until every worker finishes. With `background=true` it returns at once with a handle while the workers keep running:\n\n    task running in the background (handle t1): ...\n    HANDLE t1 RUNNING\n\n`action=\"poll\", handle=\"t1\"` says whether it is still running and returns the result once done; `action=\"wait\", handle=\"t1\", timeout=N` blocks up to N seconds, or until the end without `timeout`; `action=\"kill\", handle=\"t1\"` stops it. `handle` defaults to your most recent running task, and you see only tasks this conversation started. The finished result is also written to the file the handle names, and if you have not polled it by your next turn, a reminder names that file. Use background runs for slow, independent work you do not need before your next step."
   }
 ]

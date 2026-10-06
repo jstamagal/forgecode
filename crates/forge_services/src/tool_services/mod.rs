@@ -1,3 +1,4 @@
+mod ast_engine;
 mod fetch;
 mod fs_patch;
 mod fs_read;
@@ -10,7 +11,9 @@ mod notebook;
 mod patch_engine;
 mod plan_create;
 mod provenance;
+mod search_engine;
 mod shell;
+mod shell_jobs;
 mod skill;
 mod syn;
 

@@ -1,5 +1,0 @@
----
-source: crates/forge_app/src/operation.rs
-expression: to_value(actual)
----
-1:Truncated content

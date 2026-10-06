@@ -68,6 +68,19 @@ impl FormatContent for ToolCatalog {
                 };
                 Some(TitleFormat::debug(title).into())
             }
+            ToolCatalog::AstSearch(input) => {
+                let at = display_path_for(input.path.as_deref().unwrap_or("."));
+                let verb = match (&input.rewrite, input.apply) {
+                    (Some(_), true) => "Rewrite",
+                    (Some(_), false) => "Preview rewrite",
+                    (None, _) => "AST search",
+                };
+                Some(
+                    TitleFormat::debug(verb)
+                        .sub_title(format!("{} at {at}", input.pattern))
+                        .into(),
+                )
+            }
             ToolCatalog::Remove(input) => {
                 let display_path = display_path_for(&input.path);
                 Some(TitleFormat::debug("Remove").sub_title(display_path).into())

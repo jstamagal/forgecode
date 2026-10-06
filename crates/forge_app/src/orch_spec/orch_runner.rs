@@ -262,6 +262,14 @@ impl ShellService for Runner {
             })
         }
     }
+
+    async fn shell_tool(
+        &self,
+        _input: forge_domain::Shell,
+        _cwd: std::path::PathBuf,
+    ) -> anyhow::Result<String> {
+        unimplemented!("the orchestrator spec mocks tool calls, not the shell tool")
+    }
 }
 
 impl EnvironmentInfra for Runner {

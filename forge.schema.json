@@ -82,6 +82,18 @@
         }
       ]
     },
+    "lock_subagent_model": {
+      "description": "When true, the `task` tool refuses a `model` override; workers always\nrun on their agent's configured model.",
+      "type": "boolean",
+      "default": false
+    },
+    "max_bash_output_bytes": {
+      "description": "Shell output shown per call, stdout and stderr together; past it the\nhead and tail are shown and the whole stream is written to a file.",
+      "type": "integer",
+      "format": "uint64",
+      "default": 0,
+      "minimum": 0
+    },
     "max_commit_count": {
       "description": "Maximum number of recent commits included as context for commit message\ngeneration.",
       "type": "integer",
@@ -98,13 +110,6 @@
     },
     "max_extensions": {
       "description": "Maximum number of file extensions included in the agent system prompt.",
-      "type": "integer",
-      "format": "uint",
-      "default": 0,
-      "minimum": 0
-    },
-    "max_fetch_chars": {
-      "description": "Maximum number of characters returned from a URL fetch.",
       "type": "integer",
       "format": "uint",
       "default": 0,
@@ -159,41 +164,6 @@
         "null"
       ],
       "format": "uint",
-      "minimum": 0
-    },
-    "max_search_lines": {
-      "description": "Maximum number of lines returned by a single file search operation.",
-      "type": "integer",
-      "format": "uint",
-      "default": 0,
-      "minimum": 0
-    },
-    "max_search_result_bytes": {
-      "description": "Maximum number of bytes returned by a single file search operation.",
-      "type": "integer",
-      "format": "uint",
-      "default": 0,
-      "minimum": 0
-    },
-    "max_stdout_line_chars": {
-      "description": "Maximum number of characters per line in shell command output.",
-      "type": "integer",
-      "format": "uint",
-      "default": 0,
-      "minimum": 0
-    },
-    "max_stdout_prefix_lines": {
-      "description": "Maximum number of lines captured from the leading portion of shell\ncommand output.",
-      "type": "integer",
-      "format": "uint",
-      "default": 0,
-      "minimum": 0
-    },
-    "max_stdout_suffix_lines": {
-      "description": "Maximum number of lines captured from the trailing portion of shell\ncommand output.",
-      "type": "integer",
-      "format": "uint",
-      "default": 0,
       "minimum": 0
     },
     "max_tokens": {
@@ -295,6 +265,23 @@
         }
       ]
     },
+    "shell_env_allow": {
+      "description": "Environment variable names a `shell` command inherits without naming\nthem in its `env` argument. Unset means PATH, HOME, USER, LANG,\nLC_ALL, TERM, PWD, SHELL.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "subagent_max_workers": {
+      "description": "Maximum workers one `task` call runs at once.",
+      "type": "integer",
+      "format": "uint",
+      "default": 0,
+      "minimum": 0
+    },
     "subagents": {
       "description": "Enables subagent support via the task tool; when true the forge agent\ngains access to the `task` tool for delegating work to specialised\nsub-agents, and the `sage` research-only agent tool is removed.\nWhen false the `task` tool is disabled and `sage` is available instead.",
       "type": "boolean",
@@ -310,6 +297,13 @@
           "type": "null"
         }
       ]
+    },
+    "task_max_depth": {
+      "description": "Maximum nesting depth of `task` workers (a worker's own task calls\ncount one level deeper).",
+      "type": "integer",
+      "format": "uint",
+      "default": 0,
+      "minimum": 0
     },
     "temperature": {
       "description": "Output randomness for all agents; lower values are deterministic, higher\nvalues are creative (0.0–2.0).",

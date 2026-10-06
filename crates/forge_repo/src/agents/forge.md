@@ -7,6 +7,7 @@ reasoning:
 tools:
   - task
   - fs_search
+  - ast_search
   - read
   - write
   - undo

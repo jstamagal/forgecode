@@ -73,6 +73,25 @@ impl<F: SnapshotRepository> FsUndoService for ForgeFsUndo<F> {
         };
         Ok(FsUndoOutput { before_undo, after_undo, kind })
     }
+
+    async fn snapshot_before_write(
+        &self,
+        path: &Path,
+        context: &ToolCallContext,
+    ) -> anyhow::Result<Vec<String>> {
+        assert_absolute_path(path)?;
+        let coverage = context.reads()?.with(|l| {
+            l.coverage(&key(path))
+                .map(|c| forge_domain::SnapshotCoverage {
+                    hash: c.hash.clone(),
+                    ranges: c.ranges.clone(),
+                    whole: c.whole,
+                })
+        });
+        self.infra
+            .insert_snapshot(context.conversation_id(), path, coverage)
+            .await
+    }
 }
 
 #[cfg(test)]

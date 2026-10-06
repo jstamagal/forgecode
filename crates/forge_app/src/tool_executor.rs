@@ -4,7 +4,7 @@ use std::sync::Arc;
 use forge_domain::{ToolCallContext, ToolCatalog, ToolOutput};
 
 use crate::fmt::content::FormatContent;
-use crate::operation::{TempContentFiles, ToolOperation};
+use crate::operation::ToolOperation;
 use crate::services::{ReadRequest, Services, ShellService};
 use crate::{
     AgentRegistry, ConversationService, EnvironmentInfra, FsPatchService, FsReadService,
@@ -39,53 +39,6 @@ impl<
         Self { services }
     }
 
-    async fn dump_operation(&self, operation: &ToolOperation) -> anyhow::Result<TempContentFiles> {
-        match operation {
-            ToolOperation::NetFetch { input: _, output } => {
-                let config = self.services.get_config()?;
-                let original_length = output.content.len();
-                let is_truncated = original_length > config.max_fetch_chars;
-                let mut files = TempContentFiles::default();
-
-                if is_truncated {
-                    files = files.stdout(
-                        self.create_temp_file("forge_fetch_", ".txt", &output.content)
-                            .await?,
-                    );
-                }
-
-                Ok(files)
-            }
-            ToolOperation::Shell { output } => {
-                let config = self.services.get_config()?;
-                let stdout_lines = output.output.stdout.lines().count();
-                let stderr_lines = output.output.stderr.lines().count();
-                let stdout_truncated =
-                    stdout_lines > config.max_stdout_prefix_lines + config.max_stdout_suffix_lines;
-                let stderr_truncated =
-                    stderr_lines > config.max_stdout_prefix_lines + config.max_stdout_suffix_lines;
-
-                let mut files = TempContentFiles::default();
-
-                if stdout_truncated {
-                    files = files.stdout(
-                        self.create_temp_file("forge_shell_stdout_", ".txt", &output.output.stdout)
-                            .await?,
-                    );
-                }
-                if stderr_truncated {
-                    files = files.stderr(
-                        self.create_temp_file("forge_shell_stderr_", ".txt", &output.output.stderr)
-                            .await?,
-                    );
-                }
-
-                Ok(files)
-            }
-            _ => Ok(TempContentFiles::default()),
-        }
-    }
-
     /// Converts a path to absolute by joining it with the current working
     /// directory if it's relative
     fn normalize_path(&self, path: String) -> String {
@@ -97,29 +50,6 @@ impl<
         } else {
             PathBuf::from(&env.cwd).join(path_buf).display().to_string()
         }
-    }
-
-    async fn create_temp_file(
-        &self,
-        prefix: &str,
-        ext: &str,
-        content: &str,
-    ) -> anyhow::Result<std::path::PathBuf> {
-        let path = tempfile::Builder::new()
-            .disable_cleanup(true)
-            .prefix(prefix)
-            .suffix(ext)
-            .tempfile()?
-            .into_temp_path()
-            .to_path_buf();
-        self.services
-            .write(
-                path.to_string_lossy().to_string(),
-                content.to_string(),
-                true,
-            )
-            .await?;
-        Ok(path)
     }
 
     async fn call_internal(
@@ -158,13 +88,27 @@ impl<
                 (input, output).into()
             }
             ToolCatalog::FsSearch(input) => {
-                let mut params = input.clone();
-                // Normalize path if provided
-                if let Some(ref path) = params.path {
-                    params.path = Some(self.normalize_path(path.clone()));
-                }
-                let output = self.services.search(params).await?;
-                (input, output).into()
+                let mut params = input;
+                // Resolve the search root against the working directory.
+                let root = params
+                    .path
+                    .clone()
+                    .filter(|path| !path.is_empty())
+                    .unwrap_or_else(|| self.services.get_environment().cwd.display().to_string());
+                params.path = Some(self.normalize_path(root));
+                let text = self.services.search(params).await?;
+                ToolOperation::Output { output: ToolOutput::text(text) }
+            }
+            ToolCatalog::AstSearch(input) => {
+                let mut params = input;
+                let root = params
+                    .path
+                    .clone()
+                    .filter(|path| !path.is_empty())
+                    .unwrap_or_else(|| self.services.get_environment().cwd.display().to_string());
+                params.path = Some(self.normalize_path(root));
+                let text = self.services.ast_search(params, context).await?;
+                ToolOperation::Output { output: ToolOutput::text(text) }
             }
             ToolCatalog::Remove(input) => {
                 let normalized_path = self.normalize_path(input.path.clone());
@@ -191,25 +135,37 @@ impl<
             ToolCatalog::Shell(input) => {
                 let cwd = input
                     .cwd
+                    .clone()
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|| self.services.get_environment().cwd.display().to_string());
                 let normalized_cwd = self.normalize_path(cwd);
-                let output = self
+                let text = self
                     .services
-                    .execute(
-                        input.command.clone(),
-                        PathBuf::from(normalized_cwd),
-                        input.keep_ansi,
-                        false,
-                        input.env.clone(),
-                        input.description.clone(),
-                    )
+                    .shell_tool(input, PathBuf::from(normalized_cwd))
                     .await?;
-                output.into()
+                ToolOperation::Text { text }
             }
             ToolCatalog::Fetch(input) => {
-                let output = self.services.fetch(input.url.clone(), input.raw).await?;
-                (input, output).into()
+                let save = input
+                    .save
+                    .clone()
+                    .map(|path| PathBuf::from(self.normalize_path(path)));
+                if let Some(target) = &save {
+                    // A save overwrites; snapshot it so undo brings it back.
+                    self.services.snapshot_before_write(target, context).await?;
+                }
+                let request = crate::services::FetchRequest {
+                    url: input.url.clone(),
+                    method: input.method(),
+                    headers: input.headers.clone().unwrap_or_default(),
+                    body: input.body.clone(),
+                    json_body: input.json_body.clone(),
+                    raw: input.raw.unwrap_or(false),
+                    save,
+                    vision: context.vision(),
+                };
+                let output = self.services.fetch_tool(request).await?;
+                ToolOperation::Output { output }
             }
             ToolCatalog::Plan(input) => {
                 let output = self
@@ -250,7 +206,6 @@ impl<
     ) -> anyhow::Result<ToolOutput> {
         let tool_kind = tool_input.kind();
         let env = self.services.get_environment();
-        let config = self.services.get_config()?;
 
         let execution_result = self.call_internal(tool_input.clone(), context).await;
 
@@ -265,10 +220,6 @@ impl<
             context.send(output).await?;
         }
 
-        let truncation_path = self.dump_operation(&operation).await?;
-
-        context.with_metrics(|metrics| {
-            operation.into_tool_output(tool_kind, truncation_path, &env, &config, metrics)
-        })
+        context.with_metrics(|metrics| operation.into_tool_output(tool_kind, &env, metrics))
     }
 }

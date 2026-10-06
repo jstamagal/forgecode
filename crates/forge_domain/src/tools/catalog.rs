@@ -44,6 +44,7 @@ pub enum ToolCatalog {
     #[serde(alias = "Write")]
     Write(FSWrite),
     FsSearch(FSSearch),
+    AstSearch(AstSearch),
     Remove(FSRemove),
     Patch(FSPatch),
     Undo(FSUndo),
@@ -73,22 +74,42 @@ pub struct AgentInput {
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
 #[tool_description_file = "crates/forge_domain/src/tools/descriptions/task.md"]
 pub struct TaskInput {
-    /// A list of clear and detailed descriptions of the tasks to be performed
-    /// by the agent in parallel. Provide sufficient context and specific
-    /// requirements to enable the agent to understand and execute the work
-    /// accurately.
+    /// Self-contained prompts, one per worker; they run in parallel (required
+    /// to start workers).
+    #[serde(default)]
     pub tasks: Vec<String>,
 
-    /// The ID of the specialized agent to delegate to (e.g., "forge", "muse",
-    /// "sage")
+    /// The agent the workers run as (required to start workers).
+    #[serde(default)]
     pub agent_id: String,
 
-    /// Optional session ID to continue an existing agent session. If not
-    /// provided, a new stateless session will be created. Use this to
-    /// maintain context across multiple task invocations with the same
-    /// agent.
+    /// Resume an earlier worker session (one task only). An unknown id is an
+    /// error.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+
+    /// Run the workers in the background and return a handle at once.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub background: bool,
+
+    /// Model the workers run on instead of the agent's configured model. Leave
+    /// unset unless the user asks for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    /// run (default), poll, wait or kill; poll/wait/kill act on a background
+    /// task's handle.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub action: ShellAction,
+
+    /// Handle of a background task (default: your most recent running one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
+
+    /// Seconds a wait blocks (default: until the task ends).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub timeout: Option<u64>,
 }
 
 fn default_true() -> bool {
@@ -259,70 +280,71 @@ pub struct FSWrite {
 #[tool_description_file = "crates/forge_domain/src/tools/descriptions/fs_search.md"]
 #[derive(Default)]
 pub struct FSSearch {
-    /// The regular expression pattern to search for in file contents.
+    /// Regex to search file contents for.
     pub pattern: String,
 
-    /// File or directory to search in (rg PATH). Defaults to current working
-    /// directory.
+    /// File or directory to search (default: the current directory).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
 
-    /// Glob pattern to filter files (e.g. "*.js", "*.{ts,tsx}") - maps to rg
-    /// --glob
+    /// Glob filter on paths (e.g. "*.rs", "*.{ts,tsx}", "!*.min.js").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub glob: Option<String>,
 
-    /// Output mode: "content" shows matching lines (supports -A/-B/-C context,
-    /// -n line numbers, head_limit), "files_with_matches" shows file paths
-    /// (supports head_limit), "count" shows match counts (supports head_limit).
-    /// Defaults to "files_with_matches".
+    /// "content" (matching lines), "files_with_matches" (paths, default) or
+    /// "count" (matches per file).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_mode: Option<OutputMode>,
 
-    /// Number of lines to show before each match (rg -B). Requires output_mode:
-    /// "content", ignored otherwise.
-    #[serde(rename = "-B", skip_serializing_if = "Option::is_none")]
-    pub before_context: Option<u32>,
+    /// Lines of context before each match (content mode).
+    #[serde(alias = "-B", skip_serializing_if = "Option::is_none")]
+    pub context_before: Option<u32>,
 
-    /// Number of lines to show after each match (rg -A). Requires output_mode:
-    /// "content", ignored otherwise.
-    #[serde(rename = "-A", skip_serializing_if = "Option::is_none")]
-    pub after_context: Option<u32>,
+    /// Lines of context after each match (content mode).
+    #[serde(alias = "-A", skip_serializing_if = "Option::is_none")]
+    pub context_after: Option<u32>,
 
-    /// Number of lines to show before and after each match (rg -C). Requires
-    /// output_mode: "content", ignored otherwise.
-    #[serde(rename = "-C", skip_serializing_if = "Option::is_none")]
+    /// Lines of context before and after each match (content mode).
+    #[serde(alias = "-C", skip_serializing_if = "Option::is_none")]
     pub context: Option<u32>,
 
-    /// Show line numbers in output (rg -n). Requires output_mode: "content",
-    /// ignored otherwise.
-    #[serde(rename = "-n", skip_serializing_if = "Option::is_none")]
-    pub show_line_numbers: Option<bool>,
+    /// Prefix content lines with their line numbers (default true).
+    #[serde(alias = "-n", skip_serializing_if = "Option::is_none")]
+    pub line_numbers: Option<bool>,
 
-    /// Case insensitive search (rg -i)
-    #[serde(rename = "-i", skip_serializing_if = "Option::is_none")]
+    /// Match without case sensitivity.
+    #[serde(alias = "-i", skip_serializing_if = "Option::is_none")]
     pub case_insensitive: Option<bool>,
 
-    /// File type to search (rg --type). Common types: js, py, rust, go, java,
-    /// etc. More efficient than include for standard file types.
-    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    /// File type, e.g. rust, py, js (ripgrep type names).
+    #[serde(alias = "type", skip_serializing_if = "Option::is_none")]
     pub file_type: Option<String>,
 
-    /// Limit output to first N lines/entries, equivalent to "| head -N". Works
-    /// across all output modes: content (limits output lines),
-    /// files_with_matches (limits file paths), count (limits count entries).
-    /// When unspecified, shows all results from ripgrep.
+    /// Maximum result entries after `offset`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
     pub head_limit: Option<u32>,
 
-    /// Skip first N lines/entries before applying head_limit
+    /// Result entries to skip before `head_limit`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offset: Option<u32>,
 
-    /// Enable multiline mode where . matches newlines and patterns can span
-    /// lines (rg -U --multiline-dotall). Default: false.
+    /// Let the regex span lines (`.` matches newlines).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub multiline: Option<bool>,
+}
+
+impl FSSearch {
+    /// ripgrep spellings accepted on input and their schema names. They stay
+    /// out of the schema; the executor rewrites them before validation.
+    pub const ARGUMENT_ALIASES: [(&'static str, &'static str); 6] = [
+        ("-A", "context_after"),
+        ("-B", "context_before"),
+        ("-C", "context"),
+        ("-n", "line_numbers"),
+        ("-i", "case_insensitive"),
+        ("type", "file_type"),
+    ];
 }
 
 /// Output mode for search results
@@ -557,54 +579,151 @@ pub struct FSUndo {
     pub path: String,
 }
 
+/// What a `shell` call does.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellAction {
+    /// Start `command` and wait up to `timeout` seconds for it.
+    #[default]
+    Run,
+    /// Report a running job's new output without waiting.
+    Poll,
+    /// Wait up to `timeout` more seconds for a running job.
+    Wait,
+    /// Stop a running job (SIGTERM, then SIGKILL, to its process group).
+    Kill,
+}
+
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
 #[tool_description_file = "crates/forge_domain/src/tools/descriptions/shell.md"]
 pub struct Shell {
-    /// The shell command to execute.
+    /// The command to run (required for action "run").
+    #[serde(default)]
     pub command: String,
 
-    /// The working directory where the command should be executed.
-    /// If not specified, defaults to the current working directory from the
-    /// environment.
+    /// Working directory for the command (default: the current directory).
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
 
-    /// Whether to preserve ANSI escape codes in the output.
-    /// If true, ANSI escape codes will be preserved in the output.
-    /// If false (default), ANSI escape codes will be stripped from the output.
+    /// Keep ANSI escape codes in the output (default false).
     #[serde(default)]
     #[serde(skip_serializing_if = "is_default")]
     pub keep_ansi: bool,
 
-    /// Environment variable names to pass to command execution (e.g., ["PATH",
-    /// "HOME", "USER"]). The system automatically reads the specified
-    /// values and applies them during command execution.
+    /// Extra environment variable names to pass through, on top of the
+    /// configured allow-list.
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<Vec<String>>,
 
-    /// Clear, concise description of what this command does. Recommended to be
-    /// 5-10 words for simple commands. For complex commands with pipes or
-    /// multiple operations, provide more context. Examples: "Lists files in
-    /// current directory", "Installs package dependencies", "Compiles Rust
-    /// project with release optimizations".
+    /// Short description of what the command does.
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+
+    /// run (default), poll, wait or kill.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "is_default")]
+    pub action: ShellAction,
+
+    /// Job id from a `HANDLE n RUNNING` line, for poll/wait/kill (default:
+    /// the most recent running job).
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
+
+    /// Seconds to wait before returning a handle (run) or to keep waiting
+    /// (wait); default 30. The command is never killed when the window ends.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub timeout: Option<u64>,
+}
+
+/// Input for the `ast_search` tool: structural search and rewrite.
+#[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
+#[tool_description_file = "crates/forge_domain/src/tools/descriptions/ast_search.md"]
+pub struct AstSearch {
+    /// ast-grep pattern; `$NAME` matches one node, `$$$NAME` zero or more.
+    pub pattern: String,
+
+    /// Language (e.g. rust, python, typescript, tsx, go, c, cpp); inferred
+    /// from each file's extension when omitted.
+    #[serde(default, alias = "lang", skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+
+    /// File or directory to search (default: the current directory).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+
+    /// Replacement template using the pattern's metavariables; without
+    /// `apply` the result is a diff and nothing is written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewrite: Option<String>,
+
+    /// Write the rewrite (default false).
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub apply: bool,
+
+    /// Most matches reported (default 200); an apply with more matches is
+    /// refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub max_results: Option<u32>,
 }
 
 /// Input type for the net fetch tool
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
 #[tool_description_file = "crates/forge_domain/src/tools/descriptions/net_fetch.md"]
 pub struct NetFetch {
-    /// URL to fetch
+    /// URL to fetch: http(s):// or file://.
     pub url: String,
 
-    /// Get raw content without any markdown conversion (default: false)
+    /// Return the body as is, without HTML-to-markdown conversion (default
+    /// false).
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw: Option<bool>,
+
+    /// HTTP method (default GET).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+
+    /// Request headers, name to value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<std::collections::BTreeMap<String, String>>,
+
+    /// Request body text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+
+    /// Request body as JSON (sets Content-Type: application/json); not with
+    /// `body`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<serde_json::Map<String, serde_json::Value>>")]
+    pub json_body: Option<serde_json::Value>,
+
+    /// Stream the response body to this path instead of returning it; no size
+    /// limit, resumable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save: Option<String>,
+}
+
+impl NetFetch {
+    /// Creates a GET request for `url`.
+    pub fn new(url: impl Into<String>) -> Self {
+        Self { url: url.into(), ..Default::default() }
+    }
+
+    /// The request method, upper-cased (default GET).
+    pub fn method(&self) -> String {
+        self.method
+            .as_deref()
+            .map(|m| m.trim().to_uppercase())
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| "GET".to_string())
+    }
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
@@ -753,6 +872,7 @@ impl ToolDescription for ToolCatalog {
             ToolCatalog::Shell(v) => v.description(),
             ToolCatalog::Fetch(v) => v.description(),
             ToolCatalog::FsSearch(v) => v.description(),
+            ToolCatalog::AstSearch(v) => v.description(),
             ToolCatalog::Read(v) => v.description(),
             ToolCatalog::Remove(v) => v.description(),
             ToolCatalog::Undo(v) => v.description(),
@@ -825,6 +945,7 @@ impl ToolCatalog {
             ToolCatalog::Shell(_) => r#gen.into_root_schema_for::<Shell>(),
             ToolCatalog::Fetch(_) => r#gen.into_root_schema_for::<NetFetch>(),
             ToolCatalog::FsSearch(_) => r#gen.into_root_schema_for::<FSSearch>(),
+            ToolCatalog::AstSearch(_) => r#gen.into_root_schema_for::<AstSearch>(),
             ToolCatalog::Read(_) => r#gen.into_root_schema_for::<FSRead>(),
             ToolCatalog::Remove(_) => r#gen.into_root_schema_for::<FSRemove>(),
             ToolCatalog::Undo(_) => r#gen.into_root_schema_for::<FSUndo>(),
@@ -877,22 +998,29 @@ impl ToolCatalog {
 
     /// X6: whether this call writes nothing, so it may run in parallel with
     /// other read-only calls. Anything that mutates files, runs processes or
-    /// changes session state is a barrier.
+    /// changes session state is a barrier. A fetch is read-only only as a GET
+    /// or HEAD that saves nothing.
     pub fn is_read_only(&self) -> bool {
-        matches!(
-            self,
+        match self {
+            ToolCatalog::Fetch(input) => {
+                matches!(input.method().as_str(), "GET" | "HEAD") && input.save.is_none()
+            }
+            ToolCatalog::AstSearch(input) => !input.apply,
             ToolCatalog::Read(_)
-                | ToolCatalog::FsSearch(_)
-                | ToolCatalog::Fetch(_)
-                | ToolCatalog::Skill(_)
-                | ToolCatalog::TodoRead(_)
-        )
+            | ToolCatalog::FsSearch(_)
+            | ToolCatalog::Skill(_)
+            | ToolCatalog::TodoRead(_) => true,
+            _ => false,
+        }
     }
 
     /// X7: whether the tool bounds its own run time (window, timeout or
     /// protocol limit), so the executor's blanket backstop does not apply.
     pub fn has_own_timeout(&self) -> bool {
-        matches!(self, ToolCatalog::Task(_))
+        matches!(
+            self,
+            ToolCatalog::Task(_) | ToolCatalog::Shell(_) | ToolCatalog::Fetch(_)
+        )
     }
 
     /// Convert a tool input to its corresponding domain operation for policy
@@ -949,6 +1077,21 @@ impl ToolCatalog {
                     path: std::path::PathBuf::from(path_str),
                     cwd,
                     message,
+                })
+            }
+            ToolCatalog::AstSearch(input) => {
+                let path = input.path.as_deref().unwrap_or(".");
+                let message = format!(
+                    "Structural {} in {}: {}",
+                    if input.apply { "rewrite" } else { "search" },
+                    display_path_for(path),
+                    input.pattern
+                );
+                let path = std::path::PathBuf::from(path);
+                Some(if input.apply {
+                    crate::policies::PermissionOperation::Write { path, cwd, message }
+                } else {
+                    crate::policies::PermissionOperation::Read { path, cwd, message }
                 })
             }
             ToolCatalog::Remove(input) => Some(crate::policies::PermissionOperation::Write {
@@ -1669,9 +1812,8 @@ mod tests {
         let fixture = Shell {
             command: "git status".to_string(),
             cwd: Some(PathBuf::from("/test")),
-            keep_ansi: false,
-            env: None,
             description: Some("Shows working tree status".to_string()),
+            ..Default::default()
         };
 
         let actual = serde_json::to_value(&fixture).unwrap();
@@ -1692,9 +1834,7 @@ mod tests {
         let fixture = Shell {
             command: "ls -la".to_string(),
             cwd: Some(PathBuf::from("/home")),
-            keep_ansi: false,
-            env: None,
-            description: None,
+            ..Default::default()
         };
 
         let actual = serde_json::to_value(&fixture).unwrap();
@@ -1711,13 +1851,7 @@ mod tests {
     fn test_shell_without_cwd_serialization() {
         use pretty_assertions::assert_eq;
 
-        let fixture = Shell {
-            command: "pwd".to_string(),
-            cwd: None,
-            keep_ansi: false,
-            env: None,
-            description: None,
-        };
+        let fixture = Shell { command: "pwd".to_string(), ..Default::default() };
 
         let actual = serde_json::to_value(&fixture).unwrap();
 

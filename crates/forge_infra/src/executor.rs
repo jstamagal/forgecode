@@ -7,23 +7,20 @@ use forge_app::CommandInfra;
 use forge_domain::{CommandOutput, ConsoleWriter as OutputPrinterTrait, Environment};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
-use tokio::sync::Mutex;
 
 use crate::console::StdConsoleWriter;
 
-/// Service for executing shell commands
+/// Service for executing shell commands. Commands run concurrently; there is
+/// no global lock.
 #[derive(Clone, Debug)]
 pub struct ForgeCommandExecutorService {
     env: Environment,
     output_printer: Arc<StdConsoleWriter>,
-
-    // Mutex to ensure that only one command is executed at a time
-    ready: Arc<Mutex<()>>,
 }
 
 impl ForgeCommandExecutorService {
     pub fn new(env: Environment, output_printer: Arc<StdConsoleWriter>) -> Self {
-        Self { env, output_printer, ready: Arc::new(Mutex::new(())) }
+        Self { env, output_printer }
     }
 
     fn prepare_command(
@@ -98,8 +95,6 @@ impl ForgeCommandExecutorService {
         silent: bool,
         env_vars: Option<Vec<String>>,
     ) -> anyhow::Result<CommandOutput> {
-        let ready = self.ready.lock().await;
-
         let mut prepared_command = self.prepare_command(&command, working_dir, env_vars);
 
         // Spawn the command
@@ -139,7 +134,6 @@ impl ForgeCommandExecutorService {
         // Drop happens after `try_join` due to <https://github.com/tokio-rs/tokio/issues/4309>
         drop(stdout_pipe);
         drop(stderr_pipe);
-        drop(ready);
 
         Ok(CommandOutput {
             stdout: stdout_buffer.to_str_lossy().into_owned(),

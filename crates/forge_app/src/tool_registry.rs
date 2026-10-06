@@ -19,11 +19,80 @@ use crate::dto::ToolsOverview;
 use crate::error::Error;
 use crate::fmt::content::FormatContent;
 use crate::mcp_executor::McpExecutor;
+use crate::task_jobs::TaskJobs;
 use crate::tool_executor::ToolExecutor;
 use crate::{
-    AgentRegistry, EnvironmentInfra, McpService, PolicyService, ProviderService, Services,
-    ToolResolver,
+    AgentRegistry, ConversationService, EnvironmentInfra, McpService, PolicyService,
+    ProviderService, Services, ToolResolver,
 };
+
+/// Background task runs live as long as the process: the registry is rebuilt
+/// for every call, and a later call (poll, the completion note) must find
+/// them.
+pub(crate) fn task_jobs() -> &'static TaskJobs {
+    static JOBS: std::sync::OnceLock<TaskJobs> = std::sync::OnceLock::new();
+    JOBS.get_or_init(TaskJobs::default)
+}
+
+/// One worker's reply is returned verbatim; a fan-out is numbered in task
+/// order under one header. A failed worker reports its error in its own slot.
+/// Each slot is held to an equal share of `budget` (0 = no cap) so one large
+/// reply cannot crowd out its siblings. The worker's session id is named so
+/// the model can resume it.
+fn assemble_task_results(
+    results: Vec<anyhow::Result<ToolOutput>>,
+    agent_id: &str,
+    budget: usize,
+) -> String {
+    let count = results.len().max(1);
+    let share = if budget > 0 { budget / count } else { 0 };
+    let texts: Vec<String> = results
+        .into_iter()
+        .map(|result| {
+            let text = match result {
+                Ok(output) => {
+                    let session = output.values.iter().find_map(|value| match value {
+                        forge_domain::ToolValue::AI { conversation_id, .. } => {
+                            Some(conversation_id.to_string())
+                        }
+                        _ => None,
+                    });
+                    let body = output
+                        .values
+                        .iter()
+                        .filter_map(forge_domain::ToolValue::as_str)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    match session {
+                        Some(id) => format!("{body}\n(session_id={id})"),
+                        None => body,
+                    }
+                }
+                Err(error) => format!("ERROR {error:#}"),
+            };
+            if share > 0 && text.len() > share {
+                let marker =
+                    format!("\n[truncated: equal share ({share} bytes) of max_tool_result_bytes]");
+                let mut end = share.saturating_sub(marker.len());
+                while end > 0 && !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}{marker}", &text[..end])
+            } else {
+                text
+            }
+        })
+        .collect();
+    if texts.len() == 1 {
+        return texts.into_iter().next().unwrap_or_default();
+    }
+    let numbered: Vec<String> = texts
+        .iter()
+        .enumerate()
+        .map(|(index, text)| format!("{}. {text}", index + 1))
+        .collect();
+    format!("TASK_RESULTS agent={agent_id}\n\n{}", numbered.join("\n\n"))
+}
 
 pub struct ToolRegistry<S> {
     tool_executor: ToolExecutor<S>,
@@ -114,29 +183,7 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ToolReg
 
             // Special handling for Task tool - delegate to AgentExecutor
             if let ToolCatalog::Task(task_input) = tool_input {
-                let executor = self.agent_executor.clone();
-                let session_id = task_input.session_id.clone();
-                let agent_id = task_input.agent_id.clone();
-                // Parse session_id into ConversationId if present
-                let conversation_id = session_id
-                    .map(|id| forge_domain::ConversationId::parse(&id))
-                    .transpose()
-                    .ok()
-                    .flatten();
-                // NOTE: Agents should not timeout
-                let outputs = join_all(task_input.tasks.into_iter().map(|task| {
-                    let agent_id = agent_id.clone();
-                    let executor = executor.clone();
-                    async move {
-                        executor
-                            .execute(AgentId::new(&agent_id), task, context, conversation_id)
-                            .await
-                    }
-                }))
-                .await
-                .into_iter()
-                .collect::<anyhow::Result<Vec<_>>>()?;
-                return Ok(ToolOutput::from(outputs.into_iter()));
+                return self.run_task(task_input, context).await;
             }
 
             let env = self.services.get_environment();
@@ -225,6 +272,134 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ToolReg
         } else {
             Err(Error::NotFound(input.name).into())
         }
+    }
+
+    /// T22: the `task` tool. Starts workers (foreground or background) or acts
+    /// on a background run's handle.
+    async fn run_task(
+        &self,
+        input: forge_domain::TaskInput,
+        context: &ToolCallContext,
+    ) -> anyhow::Result<ToolOutput> {
+        use forge_domain::ShellAction;
+
+        use crate::task_jobs::{report, started_text};
+
+        let jobs = task_jobs();
+        if input.action != ShellAction::Run {
+            let owner = context.conversation_id();
+            let action = match input.action {
+                ShellAction::Poll => "poll",
+                ShellAction::Wait => "wait",
+                _ => "kill",
+            };
+            let Some(job) = jobs.find(owner, input.handle.as_deref()) else {
+                anyhow::bail!(
+                    "no background task{} to {action}",
+                    input.handle.map(|h| format!(" {h}")).unwrap_or_default()
+                );
+            };
+            let was_running = job.running();
+            match input.action {
+                ShellAction::Kill => job.kill(),
+                ShellAction::Wait => {
+                    job.wait(input.timeout.map(std::time::Duration::from_secs))
+                        .await
+                }
+                _ => {}
+            }
+            return Ok(ToolOutput::text(report(
+                &job,
+                input.action == ShellAction::Kill,
+                was_running,
+            )));
+        }
+
+        let config = self.services.get_config()?;
+        let agent_id = input.agent_id.trim().to_string();
+        if agent_id.is_empty() {
+            anyhow::bail!("task requires agent_id");
+        }
+        let tasks: Vec<String> = input
+            .tasks
+            .iter()
+            .map(|task| task.trim().to_string())
+            .filter(|task| !task.is_empty())
+            .collect();
+        if tasks.is_empty() {
+            anyhow::bail!("task requires at least one non-empty task");
+        }
+        if input.session_id.is_some() && tasks.len() > 1 {
+            anyhow::bail!(
+                "session_id runs one task per session. Pass a single task, or omit session_id so each parallel worker gets its own fresh session."
+            );
+        }
+        let max_depth = config.task_max_depth.max(1);
+        if context.task_depth() >= max_depth {
+            anyhow::bail!("task recursion depth limit reached ({max_depth})");
+        }
+        if input.model.is_some() && config.lock_subagent_model {
+            anyhow::bail!("the model override is locked by configuration; omit `model`");
+        }
+        if self
+            .services
+            .get_agent(&AgentId::new(&agent_id))
+            .await?
+            .is_none()
+        {
+            anyhow::bail!("agent {agent_id:?} not found");
+        }
+        let session = match &input.session_id {
+            Some(id) => {
+                let id = forge_domain::ConversationId::parse(id)
+                    .map_err(|_| anyhow::anyhow!("invalid session_id {id:?}"))?;
+                if self.services.find_conversation(&id).await?.is_none() {
+                    anyhow::bail!("session_id {id} not found");
+                }
+                Some(id)
+            }
+            None => None,
+        };
+
+        let workers = config.subagent_max_workers.max(1);
+        let budget = config.max_tool_result_bytes as usize;
+        let executor = self.agent_executor.clone();
+        let model = input.model.clone().map(forge_domain::ModelId::new);
+        let count = tasks.len();
+        let worker_context = context.clone();
+        let agent = agent_id.clone();
+        let fan_out = async move {
+            let gate = Arc::new(tokio::sync::Semaphore::new(workers));
+            let results = join_all(tasks.into_iter().map(|task| {
+                let gate = gate.clone();
+                let executor = executor.clone();
+                let context = worker_context.clone();
+                let agent = agent.clone();
+                let model = model.clone();
+                async move {
+                    let _permit = gate.acquire().await;
+                    executor
+                        .execute_with(AgentId::new(&agent), task, &context, session, model)
+                        .await
+                }
+            }))
+            .await;
+            assemble_task_results(results, &agent, budget)
+        };
+
+        if input.background {
+            let results_dir =
+                crate::result_bounds::spill_dir(&self.services.get_environment().base_path);
+            let job = jobs.start(
+                *context.conversation_id(),
+                &agent_id,
+                count,
+                &results_dir,
+                fan_out,
+            );
+            return Ok(ToolOutput::text(started_text(&job)));
+        }
+        Ok(ToolOutput::text(fan_out.await))
     }
 
     pub async fn call(
@@ -321,9 +496,6 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ToolReg
             max_read_size: config.max_read_lines as usize,
             max_read_bytes: config.max_read_bytes as usize,
             max_image_size: config.max_image_size_bytes as usize,
-            stdout_max_prefix_length: config.max_stdout_prefix_lines,
-            stdout_max_suffix_length: config.max_stdout_suffix_lines,
-            stdout_max_line_length: config.max_stdout_line_chars,
         };
 
         Ok(ToolsOverview::new()
@@ -816,7 +988,6 @@ fn test_dynamic_tool_description_with_vision_model() {
         max_read_size: 2000,
         max_read_bytes: 262144,
         max_image_size: 5000,
-        ..Default::default()
     };
     let vision_model = create_test_model("gpt-4o", vec![InputModality::Text, InputModality::Image]);
 
@@ -843,7 +1014,6 @@ fn test_dynamic_tool_description_with_text_only_model() {
         max_read_size: 2000,
         max_read_bytes: 262144,
         max_image_size: 5000,
-        ..Default::default()
     };
     let text_only_model = create_test_model("gpt-3.5-turbo", vec![InputModality::Text]);
 
@@ -875,6 +1045,48 @@ fn test_supports_images() {
     );
     let expected = (true, false, false);
     pretty_assertions::assert_eq!(actual, expected);
+}
+
+#[test]
+fn test_assemble_task_results_single_verbatim_and_fan_out_numbered() {
+    let conversation = forge_domain::ConversationId::generate();
+    let single = assemble_task_results(
+        vec![Ok(ToolOutput::ai(conversation, "the answer"))],
+        "sage",
+        0,
+    );
+    let fan_out = assemble_task_results(
+        vec![
+            Ok(ToolOutput::text("first")),
+            Err(anyhow::anyhow!("worker exploded")),
+        ],
+        "sage",
+        0,
+    );
+    let expected_single = format!("the answer\n(session_id={conversation})");
+    let expected_fan_out = "TASK_RESULTS agent=sage\n\n1. first\n\n2. ERROR worker exploded";
+    pretty_assertions::assert_eq!(
+        (single, fan_out.as_str()),
+        (expected_single, expected_fan_out)
+    );
+}
+
+#[test]
+fn test_assemble_task_results_holds_each_reply_to_its_share() {
+    let actual = assemble_task_results(
+        vec![
+            Ok(ToolOutput::text("x".repeat(500))),
+            Ok(ToolOutput::text("y")),
+        ],
+        "forge",
+        400,
+    );
+    let first = actual.split("\n\n2. ").next().unwrap();
+    assert!(
+        first.contains("[truncated: equal share (200 bytes)"),
+        "{first}"
+    );
+    assert!(actual.ends_with("2. y"), "{actual}");
 }
 
 #[test]
@@ -928,7 +1140,6 @@ fn test_dynamic_tool_description_without_model() {
         max_read_size: 2000,
         max_image_size: 5000,
         max_read_bytes: 262144,
-        ..Default::default()
     };
 
     // When no model is provided, should default to showing minimal capabilities
@@ -954,9 +1165,6 @@ fn test_all_rendered_tool_descriptions() {
         max_read_size: 2000,
         max_read_bytes: 262144,
         max_image_size: 5000,
-        stdout_max_prefix_length: 200,
-        stdout_max_suffix_length: 200,
-        stdout_max_line_length: 2000,
     };
 
     let tools =

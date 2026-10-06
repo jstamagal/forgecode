@@ -20,6 +20,9 @@ pub struct ToolCallContext {
     /// Whether the current model accepts image input.
     #[setters(skip)]
     vision: bool,
+    /// How many `task` levels deep the conversation runs (0 = the user's own).
+    #[setters(skip)]
+    task_depth: usize,
 }
 
 impl ToolCallContext {
@@ -31,7 +34,19 @@ impl ToolCallContext {
             conversation_id: ConversationId::default(),
             call_id: None,
             vision: false,
+            task_depth: 0,
         }
+    }
+
+    /// Sets the `task` nesting depth of the conversation.
+    pub fn with_task_depth(mut self, task_depth: usize) -> Self {
+        self.task_depth = task_depth;
+        self
+    }
+
+    /// The `task` nesting depth of the conversation.
+    pub fn task_depth(&self) -> usize {
+        self.task_depth
     }
 
     /// Binds the context to a conversation.

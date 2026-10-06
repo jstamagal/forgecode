@@ -406,6 +406,51 @@ fn parse_arguments(arguments: &ToolCallArguments) -> Result<Value, String> {
     }
 }
 
+/// Input spellings each native tool accepts besides its schema names (kept
+/// out of the schema). Rewritten before validation so a closed schema does
+/// not reject them.
+fn argument_aliases(tool: &str) -> &'static [(&'static str, &'static str)] {
+    match tool {
+        "read" | "write" => &[("path", "file_path")],
+        "patch" => &[
+            ("path", "file_path"),
+            ("search", "old_string"),
+            ("content", "new_string"),
+        ],
+        "fs_search" => &crate::FSSearch::ARGUMENT_ALIASES,
+        "ast_search" => &[("lang", "language")],
+        _ => &[],
+    }
+}
+
+/// Renames alias keys of `value` (and of patch `edits[]` items) to their
+/// schema names. A key whose schema name is also present is left alone, so
+/// the validator reports it as unknown.
+fn canonicalize_aliases(tool: &str, mut value: Value) -> Value {
+    fn rename(map: &mut Map<String, Value>, aliases: &[(&str, &str)]) {
+        for (alias, name) in aliases {
+            if !map.contains_key(*name)
+                && let Some(item) = map.remove(*alias)
+            {
+                map.insert((*name).to_string(), item);
+            }
+        }
+    }
+    if let Value::Object(map) = &mut value {
+        rename(map, argument_aliases(tool));
+        if tool == "patch"
+            && let Some(Value::Array(edits)) = map.get_mut("edits")
+        {
+            for edit in edits.iter_mut() {
+                if let Value::Object(edit) = edit {
+                    rename(edit, &[("search", "old_string"), ("content", "new_string")]);
+                }
+            }
+        }
+    }
+    value
+}
+
 /// Normalises one assistant message's tool calls against the tools offered
 /// on this request.
 ///
@@ -433,6 +478,7 @@ pub fn normalize_batch(
         let parsed = parse_arguments(&call.arguments);
         let (arguments, mut rejection) = match parsed {
             Ok(value) => {
+                let value = canonicalize_aliases(name.as_str(), value);
                 let value = match definition {
                     Some(tool) => coerce_json_containers(value, tool.input_schema.as_value()),
                     None => value,

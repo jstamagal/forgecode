@@ -1,24 +1,17 @@
-use std::cmp::min;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use console::strip_ansi_codes;
-use derive_setters::Setters;
-use forge_config::ForgeConfig;
 use forge_display::DiffFormat;
 use forge_domain::{
-    Environment, FSPatch, FSRead, FSRemove, FSSearch, FSUndo, FSWrite, FileOperation, LineNumbers,
-    Metrics, NetFetch, PlanCreate, ToolKind,
+    Environment, FSPatch, FSRead, FSRemove, FSUndo, FSWrite, FileOperation, LineNumbers, Metrics,
+    PlanCreate, ToolKind,
 };
 use forge_template::Element;
 
-use crate::truncation::{
-    Stderr, Stdout, TruncationMode, truncate_fetch_content, truncate_search_output,
-    truncate_shell_output,
-};
 use crate::utils::{compute_hash, format_display_path};
 use crate::{
-    Content, FsRemoveOutput, FsUndoOutput, FsWriteOutput, HttpResponse, PatchOutput,
-    PlanCreateOutput, ReadOutput, RemoveMode, ResponseContext, SearchResult, ShellOutput, UndoKind,
+    Content, FsRemoveOutput, FsUndoOutput, FsWriteOutput, PatchOutput, PlanCreateOutput,
+    ReadOutput, RemoveMode, UndoKind,
 };
 
 /// `<warning>` elements for undo-store notices (e.g. a snapshot kept only in
@@ -28,13 +21,6 @@ fn notice_elements(notices: &[String]) -> Vec<Element> {
         .iter()
         .map(|notice| Element::new("warning").text(notice))
         .collect()
-}
-
-#[derive(Debug, Default, Setters)]
-#[setters(into, strip_option)]
-pub struct TempContentFiles {
-    stdout: Option<PathBuf>,
-    stderr: Option<PathBuf>,
 }
 
 #[derive(Debug, derive_more::From)]
@@ -51,10 +37,6 @@ pub enum ToolOperation {
         input: FSRemove,
         output: FsRemoveOutput,
     },
-    FsSearch {
-        input: FSSearch,
-        output: Option<SearchResult>,
-    },
     FsPatch {
         input: FSPatch,
         output: PatchOutput,
@@ -63,12 +45,13 @@ pub enum ToolOperation {
         input: FSUndo,
         output: FsUndoOutput,
     },
-    NetFetch {
-        input: NetFetch,
-        output: HttpResponse,
+    /// Finished model-facing text a tool rendered itself.
+    Text {
+        text: String,
     },
-    Shell {
-        output: ShellOutput,
+    /// A finished tool output (text and/or images) a tool built itself.
+    Output {
+        output: forge_domain::ToolOutput,
     },
     PlanCreate {
         input: PlanCreate,
@@ -84,115 +67,6 @@ pub enum ToolOperation {
     TodoRead {
         output: Vec<forge_domain::Todo>,
     },
-}
-
-/// Trait for stream elements that can be converted to XML elements
-pub trait StreamElement {
-    fn stream_name(&self) -> &'static str;
-    fn head_content(&self) -> &str;
-    fn tail_content(&self) -> Option<&str>;
-    fn total_lines(&self) -> usize;
-    fn head_end_line(&self) -> usize;
-    fn tail_start_line(&self) -> Option<usize>;
-    fn tail_end_line(&self) -> Option<usize>;
-}
-
-impl StreamElement for Stdout {
-    fn stream_name(&self) -> &'static str {
-        "stdout"
-    }
-
-    fn head_content(&self) -> &str {
-        &self.head
-    }
-
-    fn tail_content(&self) -> Option<&str> {
-        self.tail.as_deref()
-    }
-
-    fn total_lines(&self) -> usize {
-        self.total_lines
-    }
-
-    fn head_end_line(&self) -> usize {
-        self.head_end_line
-    }
-
-    fn tail_start_line(&self) -> Option<usize> {
-        self.tail_start_line
-    }
-
-    fn tail_end_line(&self) -> Option<usize> {
-        self.tail_end_line
-    }
-}
-
-impl StreamElement for Stderr {
-    fn stream_name(&self) -> &'static str {
-        "stderr"
-    }
-
-    fn head_content(&self) -> &str {
-        &self.head
-    }
-
-    fn tail_content(&self) -> Option<&str> {
-        self.tail.as_deref()
-    }
-
-    fn total_lines(&self) -> usize {
-        self.total_lines
-    }
-
-    fn head_end_line(&self) -> usize {
-        self.head_end_line
-    }
-
-    fn tail_start_line(&self) -> Option<usize> {
-        self.tail_start_line
-    }
-
-    fn tail_end_line(&self) -> Option<usize> {
-        self.tail_end_line
-    }
-}
-
-/// Helper function to create stdout or stderr elements with consistent
-/// structure
-fn create_stream_element<T: StreamElement>(
-    stream: &T,
-    full_output_path: Option<&Path>,
-) -> Option<Element> {
-    if stream.head_content().is_empty() {
-        return None;
-    }
-
-    let mut elem = Element::new(stream.stream_name()).attr("total_lines", stream.total_lines());
-
-    elem = if let Some(((tail, tail_start), tail_end)) = stream
-        .tail_content()
-        .zip(stream.tail_start_line())
-        .zip(stream.tail_end_line())
-    {
-        elem.append(
-            Element::new("head")
-                .attr("display_lines", format!("1-{}", stream.head_end_line()))
-                .cdata(stream.head_content()),
-        )
-        .append(
-            Element::new("tail")
-                .attr("display_lines", format!("{tail_start}-{tail_end}"))
-                .cdata(tail),
-        )
-    } else {
-        elem.cdata(stream.head_content())
-    };
-
-    if let Some(path) = full_output_path {
-        elem = elem.attr("full_output", path.display());
-    }
-
-    Some(elem)
 }
 
 /// Creates a validation warning element for syntax errors the edit introduced
@@ -224,18 +98,13 @@ impl ToolOperation {
     ///
     /// # Arguments
     /// * `tool_kind` - The kind of tool that produced this operation.
-    /// * `content_files` - Paths to any temporary truncated content files.
     /// * `env` - Slim runtime environment (used for `cwd` and `shell`).
-    /// * `config` - Full application configuration (used for limits and
-    ///   thresholds).
     /// * `metrics` - Mutable reference to the conversation metrics that will be
     ///   updated.
     pub fn into_tool_output(
         self,
         tool_kind: ToolKind,
-        content_files: TempContentFiles,
         env: &Environment,
-        config: &ForgeConfig,
         metrics: &mut Metrics,
     ) -> forge_domain::ToolOutput {
         let tool_name = tool_kind.name();
@@ -321,71 +190,6 @@ impl ToolOperation {
                     .append(notice_elements(&output.notices));
                 forge_domain::ToolOutput::text(elem)
             }
-
-            ToolOperation::FsSearch { input, output } => match output {
-                Some(out) => {
-                    let max_lines = min(
-                        config.max_search_lines,
-                        input.head_limit.unwrap_or(u32::MAX) as usize,
-                    );
-                    let offset = input.offset.unwrap_or(0) as usize;
-                    let search_dir = Path::new(input.path.as_deref().unwrap_or("."));
-                    let truncated_output = truncate_search_output(
-                        &out.matches,
-                        offset,
-                        max_lines,
-                        config.max_search_result_bytes,
-                        search_dir,
-                    );
-
-                    let display_lines = if truncated_output.start < truncated_output.end {
-                        // Use 1-based indexing for display (humans count from
-                        // 1)
-                        format!("{}-{}", truncated_output.start + 1, truncated_output.end)
-                    } else {
-                        // No matches or empty result
-                        "0-0".to_string()
-                    };
-
-                    let mut elm = Element::new("search_results")
-                        .attr("path", input.path.as_deref().unwrap_or("."))
-                        .attr("max_bytes_allowed", config.max_search_result_bytes)
-                        .attr("total_lines", truncated_output.total)
-                        .attr("display_lines", display_lines);
-
-                    elm = elm.attr("pattern", &input.pattern);
-                    elm = elm.attr_if_some("glob", input.glob.as_ref());
-                    elm = elm.attr_if_some("file_type", input.file_type.as_ref());
-
-                    match truncated_output.strategy {
-                        TruncationMode::Byte => {
-                            let reason = format!(
-                                "Results truncated due to exceeding the {} bytes size limit. Please use a more specific search pattern",
-                                config.max_search_result_bytes
-                            );
-                            elm = elm.attr("reason", reason);
-                        }
-                        TruncationMode::Line => {
-                            let reason = format!(
-                                "Results truncated due to exceeding the {max_lines} lines limit. Please use a more specific search pattern"
-                            );
-                            elm = elm.attr("reason", reason);
-                        }
-                        TruncationMode::Full => {}
-                    };
-                    elm = elm.cdata(truncated_output.data.join("\n"));
-
-                    forge_domain::ToolOutput::text(elm)
-                }
-                None => {
-                    let mut elm = Element::new("search_results");
-                    elm = elm.attr_if_some("path", input.path);
-                    elm = elm.attr("pattern", &input.pattern);
-                    elm = elm.attr_if_some("glob", input.glob);
-                    elm = elm.attr_if_some("file_type", input.file_type.as_ref());
-                    forge_domain::ToolOutput::text(elm)
-                }
-            },
             ToolOperation::FsPatch { input, output } => {
                 let diff_result = DiffFormat::format(&output.before, &output.after);
                 let diff = console::strip_ansi_codes(diff_result.diff()).to_string();
@@ -508,68 +312,8 @@ impl ToolOperation {
                     }
                 }
             }
-            ToolOperation::NetFetch { input, output } => {
-                let content_type = match output.context {
-                    ResponseContext::Parsed => "text/markdown".to_string(),
-                    ResponseContext::Raw => output.content_type,
-                };
-                let truncated_content =
-                    truncate_fetch_content(&output.content, config.max_fetch_chars);
-                let mut elm = Element::new("http_response")
-                    .attr("url", &input.url)
-                    .attr("status_code", output.code)
-                    .attr("start_char", 0)
-                    .attr("end_char", config.max_fetch_chars.min(output.content.len()))
-                    .attr("total_chars", output.content.len())
-                    .attr("content_type", content_type);
-
-                elm = elm.append(Element::new("body").cdata(truncated_content.content));
-                if let Some(path) = content_files.stdout {
-                    elm = elm.append(Element::new("truncated").text(
-                        format!(
-                            "Content is truncated to {} chars, remaining content can be read from path: {}",
-                            config.max_fetch_chars, path.display())
-                    ));
-                }
-
-                forge_domain::ToolOutput::text(elm)
-            }
-            ToolOperation::Shell { output } => {
-                let mut parent_elem = Element::new("shell_output")
-                    .attr("command", &output.output.command)
-                    .attr("shell", &output.shell);
-
-                if let Some(description) = &output.description {
-                    parent_elem = parent_elem.attr("description", description);
-                }
-
-                if let Some(exit_code) = output.output.exit_code {
-                    parent_elem = parent_elem.attr("exit_code", exit_code);
-                }
-
-                let truncated_output = truncate_shell_output(
-                    &output.output.stdout,
-                    &output.output.stderr,
-                    config.max_stdout_prefix_lines,
-                    config.max_stdout_suffix_lines,
-                    config.max_stdout_line_chars,
-                );
-
-                let stdout_elem = create_stream_element(
-                    &truncated_output.stdout,
-                    content_files.stdout.as_deref(),
-                );
-
-                let stderr_elem = create_stream_element(
-                    &truncated_output.stderr,
-                    content_files.stderr.as_deref(),
-                );
-
-                parent_elem = parent_elem.append(stdout_elem);
-                parent_elem = parent_elem.append(stderr_elem);
-
-                forge_domain::ToolOutput::text(parent_elem)
-            }
+            ToolOperation::Text { text } => forge_domain::ToolOutput::text(text),
+            ToolOperation::Output { output } => output,
             ToolOperation::PlanCreate { input, output } => {
                 let elm = Element::new("plan_created")
                     .attr("path", output.path.display().to_string())
@@ -684,27 +428,12 @@ mod tests {
     use forge_domain::{FSRead, FSReadRange, FileInfo, ToolValue};
 
     use super::*;
-    use crate::{Content, Match, MatchResult};
+    use crate::Content;
 
     fn fixture_environment() -> Environment {
         use fake::{Fake, Faker};
         let fixture: Environment = Faker.fake();
         fixture.cwd(PathBuf::from("/projects/test")) // Set deterministic cwd to avoid flaky path formatting
-    }
-
-    fn fixture_config() -> ForgeConfig {
-        let max_bytes: f64 = 250.0 * 1024.0; // 250 KB
-        ForgeConfig {
-            max_search_lines: 25,
-            max_search_result_bytes: max_bytes.ceil() as usize,
-            max_fetch_chars: 55,
-            max_read_lines: 10,
-            max_stdout_prefix_lines: 10,
-            max_stdout_suffix_lines: 10,
-            max_stdout_line_chars: 2000,
-            max_file_size_bytes: 256 << 10, // 256 KiB
-            ..ForgeConfig::default()
-        }
     }
 
     fn to_value(output: forge_domain::ToolOutput) -> String {
@@ -759,15 +488,8 @@ mod tests {
         };
 
         let env = fixture_environment();
-        let config = fixture_config();
 
-        let actual = fixture.into_tool_output(
-            ToolKind::Read,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
+        let actual = fixture.into_tool_output(ToolKind::Read, &env, &mut Metrics::default());
 
         insta::assert_snapshot!(to_value(actual));
     }
@@ -789,14 +511,7 @@ mod tests {
         };
 
         let env = fixture_environment();
-        let config = fixture_config();
-        let actual = fixture.into_tool_output(
-            ToolKind::Read,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
+        let actual = fixture.into_tool_output(ToolKind::Read, &env, &mut Metrics::default());
 
         insta::assert_snapshot!(to_value(actual));
     }
@@ -822,47 +537,8 @@ mod tests {
         };
 
         let env = fixture_environment();
-        let config = fixture_config();
 
-        let actual = fixture.into_tool_output(
-            ToolKind::Read,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_fs_read_with_truncation_path() {
-        let content = "Truncated content";
-        let hash = crate::compute_hash(content);
-        let fixture = ToolOperation::FsRead {
-            input: FSRead {
-                file_path: "/home/user/large_file.txt".to_string(),
-                range: None,
-                show_line_numbers: true,
-            },
-            output: ReadOutput {
-                content: Content::file(content),
-                info: FileInfo::new(1, 100, 200, hash),
-            },
-        };
-
-        let env = fixture_environment();
-        let config = fixture_config();
-        let truncation_path =
-            TempContentFiles::default().stdout(PathBuf::from("/tmp/truncated_content.txt"));
-
-        let actual = fixture.into_tool_output(
-            ToolKind::Read,
-            truncation_path,
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
+        let actual = fixture.into_tool_output(ToolKind::Read, &env, &mut Metrics::default());
 
         insta::assert_snapshot!(to_value(actual));
     }
@@ -887,15 +563,8 @@ mod tests {
         };
 
         let env = fixture_environment();
-        let config = fixture_config();
 
-        let actual = fixture.into_tool_output(
-            ToolKind::Write,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
+        let actual = fixture.into_tool_output(ToolKind::Write, &env, &mut Metrics::default());
 
         insta::assert_snapshot!(to_value(actual));
     }
@@ -920,491 +589,7 @@ mod tests {
         };
 
         let env = fixture_environment();
-        let config = fixture_config();
-        let actual = fixture.into_tool_output(
-            ToolKind::Write,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_shell_output_no_truncation() {
-        let fixture = ToolOperation::Shell {
-            output: ShellOutput {
-                output: forge_domain::CommandOutput {
-                    command: "echo hello".to_string(),
-                    stdout: "hello\nworld".to_string(),
-                    stderr: "".to_string(),
-                    exit_code: Some(0),
-                },
-                shell: "/bin/bash".to_string(),
-                description: None,
-            },
-        };
-
-        let env = fixture_environment();
-        let config = fixture_config();
-        let actual = fixture.into_tool_output(
-            ToolKind::Write,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_shell_output_stdout_truncation_only() {
-        // Create stdout with more lines than the truncation limit
-        let mut stdout_lines = Vec::new();
-        for i in 1..=25 {
-            stdout_lines.push(format!("stdout line {}", i));
-        }
-        let stdout = stdout_lines.join("\n");
-
-        let fixture = ToolOperation::Shell {
-            output: ShellOutput {
-                output: forge_domain::CommandOutput {
-                    command: "long_command".to_string(),
-                    stdout,
-                    stderr: "".to_string(),
-                    exit_code: Some(0),
-                },
-                shell: "/bin/bash".to_string(),
-                description: None,
-            },
-        };
-
-        let env = fixture_environment();
-        let config = fixture_config();
-        let truncation_path =
-            TempContentFiles::default().stdout(PathBuf::from("/tmp/stdout_content.txt"));
-        let actual = fixture.into_tool_output(
-            ToolKind::Shell,
-            truncation_path,
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_shell_output_stderr_truncation_only() {
-        // Create stderr with more lines than the truncation limit
-        let mut stderr_lines = Vec::new();
-        for i in 1..=25 {
-            stderr_lines.push(format!("stderr line {}", i));
-        }
-        let stderr = stderr_lines.join("\n");
-
-        let fixture = ToolOperation::Shell {
-            output: ShellOutput {
-                output: forge_domain::CommandOutput {
-                    command: "error_command".to_string(),
-                    stdout: "".to_string(),
-                    stderr,
-                    exit_code: Some(1),
-                },
-                shell: "/bin/bash".to_string(),
-                description: None,
-            },
-        };
-
-        let env = fixture_environment();
-        let config = fixture_config();
-        let truncation_path =
-            TempContentFiles::default().stderr(PathBuf::from("/tmp/stderr_content.txt"));
-        let actual = fixture.into_tool_output(
-            ToolKind::Shell,
-            truncation_path,
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_shell_output_both_stdout_stderr_truncation() {
-        // Create both stdout and stderr with more lines than the truncation
-        // limit
-        let mut stdout_lines = Vec::new();
-        for i in 1..=25 {
-            stdout_lines.push(format!("stdout line {}", i));
-        }
-        let stdout = stdout_lines.join("\n");
-
-        let mut stderr_lines = Vec::new();
-        for i in 1..=30 {
-            stderr_lines.push(format!("stderr line {}", i));
-        }
-        let stderr = stderr_lines.join("\n");
-
-        let fixture = ToolOperation::Shell {
-            output: ShellOutput {
-                output: forge_domain::CommandOutput {
-                    command: "complex_command".to_string(),
-                    stdout,
-                    stderr,
-                    exit_code: Some(0),
-                },
-                shell: "/bin/bash".to_string(),
-                description: None,
-            },
-        };
-
-        let env = fixture_environment();
-        let config = fixture_config();
-        let truncation_path = TempContentFiles::default()
-            .stdout(PathBuf::from("/tmp/stdout_content.txt"))
-            .stderr(PathBuf::from("/tmp/stderr_content.txt"));
-        let actual = fixture.into_tool_output(
-            ToolKind::Shell,
-            truncation_path,
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_shell_output_exact_boundary_stdout() {
-        // Create stdout with exactly the truncation limit (prefix + suffix = 20
-        // lines)
-        let mut stdout_lines = Vec::new();
-        for i in 1..=20 {
-            stdout_lines.push(format!("stdout line {}", i));
-        }
-        let stdout = stdout_lines.join("\n");
-
-        let fixture = ToolOperation::Shell {
-            output: ShellOutput {
-                output: forge_domain::CommandOutput {
-                    command: "boundary_command".to_string(),
-                    stdout,
-                    stderr: "".to_string(),
-                    exit_code: Some(0),
-                },
-                shell: "/bin/bash".to_string(),
-                description: None,
-            },
-        };
-
-        let env = fixture_environment();
-        let config = fixture_config();
-        let actual = fixture.into_tool_output(
-            ToolKind::Shell,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_shell_output_single_line_each() {
-        let fixture = ToolOperation::Shell {
-            output: ShellOutput {
-                output: forge_domain::CommandOutput {
-                    command: "simple_command".to_string(),
-                    stdout: "single stdout line".to_string(),
-                    stderr: "single stderr line".to_string(),
-                    exit_code: Some(0),
-                },
-                shell: "/bin/bash".to_string(),
-                description: None,
-            },
-        };
-
-        let env = fixture_environment();
-        let config = fixture_config();
-        let actual = fixture.into_tool_output(
-            ToolKind::Shell,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_shell_output_empty_streams() {
-        let fixture = ToolOperation::Shell {
-            output: ShellOutput {
-                output: forge_domain::CommandOutput {
-                    command: "silent_command".to_string(),
-                    stdout: "".to_string(),
-                    stderr: "".to_string(),
-                    exit_code: Some(0),
-                },
-                shell: "/bin/bash".to_string(),
-                description: None,
-            },
-        };
-
-        let env = fixture_environment();
-        let config = fixture_config();
-        let actual = fixture.into_tool_output(
-            ToolKind::Shell,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_shell_output_line_number_calculation() {
-        // Test specific line number calculations for 1-based indexing
-        let mut stdout_lines = Vec::new();
-        for i in 1..=15 {
-            stdout_lines.push(format!("stdout {}", i));
-        }
-        let stdout = stdout_lines.join("\n");
-
-        let mut stderr_lines = Vec::new();
-        for i in 1..=12 {
-            stderr_lines.push(format!("stderr {}", i));
-        }
-        let stderr = stderr_lines.join("\n");
-
-        let fixture = ToolOperation::Shell {
-            output: ShellOutput {
-                output: forge_domain::CommandOutput {
-                    command: "line_test_command".to_string(),
-                    stdout,
-                    stderr,
-                    exit_code: Some(0),
-                },
-                shell: "/bin/bash".to_string(),
-                description: None,
-            },
-        };
-
-        let env = fixture_environment();
-        let config = fixture_config();
-        let truncation_path = TempContentFiles::default()
-            .stdout(PathBuf::from("/tmp/stdout_content.txt"))
-            .stderr(PathBuf::from("/tmp/stderr_content.txt"));
-        let actual = fixture.into_tool_output(
-            ToolKind::Shell,
-            truncation_path,
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_fs_search_output() {
-        // Create a large number of search matches to trigger truncation
-        let mut matches = Vec::new();
-        let total_lines = 50;
-        for i in 1..=total_lines {
-            matches.push(Match {
-                path: "/home/user/project/foo.txt".to_string(),
-                result: Some(MatchResult::Found {
-                    line: format!("Match line {}: Test", i),
-                    line_number: Some(i),
-                }),
-            });
-        }
-
-        let fixture = ToolOperation::FsSearch {
-            input: forge_domain::FSSearch {
-                path: Some("/home/user/project".to_string()),
-                pattern: "search".to_string(),
-                glob: Some("*.txt".to_string()),
-                ..Default::default()
-            },
-            output: Some(SearchResult { matches }),
-        };
-
-        let env = fixture_environment(); // max_search_lines is 25
-        let config = fixture_config();
-
-        let actual = fixture.into_tool_output(
-            ToolKind::FsSearch,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_fs_search_max_output() {
-        // Create a large number of search matches to trigger truncation
-        let mut matches = Vec::new();
-        let total_lines = 50; // Total lines found.
-        for i in 1..=total_lines {
-            matches.push(Match {
-                path: "/home/user/project/foo.txt".to_string(),
-                result: Some(MatchResult::Found {
-                    line: format!("Match line {}: Test", i),
-                    line_number: Some(i),
-                }),
-            });
-        }
-
-        let fixture = ToolOperation::FsSearch {
-            input: forge_domain::FSSearch {
-                path: Some("/home/user/project".to_string()),
-                pattern: "search".to_string(),
-                glob: Some("*.txt".to_string()),
-                ..Default::default()
-            },
-            output: Some(SearchResult { matches }),
-        };
-
-        let env = fixture_environment();
-        let mut config = fixture_config();
-        // Total lines found are 50, but we limit to 10 for this test
-        config.max_search_lines = 10;
-
-        let actual = fixture.into_tool_output(
-            ToolKind::FsSearch,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_fs_search_min_lines_but_max_line_length() {
-        // Create a large number of search matches to trigger truncation
-        let mut matches = Vec::new();
-        let total_lines = 50; // Total lines found.
-        for i in 1..=total_lines {
-            matches.push(Match {
-                path: "/home/user/project/foo.txt".to_string(),
-                result: Some(MatchResult::Found {
-                    line: format!("Match line {}: {}", i, "AB".repeat(50)),
-                    line_number: Some(i),
-                }),
-            });
-        }
-
-        let fixture = ToolOperation::FsSearch {
-            input: forge_domain::FSSearch {
-                path: Some("/home/user/project".to_string()),
-                pattern: "search".to_string(),
-                glob: Some("*.txt".to_string()),
-                ..Default::default()
-            },
-            output: Some(SearchResult { matches }),
-        };
-
-        let env = fixture_environment();
-        let mut config = fixture_config();
-        // Total lines found are 50, but we limit to 20 for this test
-        config.max_search_lines = 20;
-        let max_bytes: f64 = 0.001 * 1024.0 * 1024.0;
-        config.max_search_result_bytes = max_bytes.ceil() as usize; // limit to 0.001 MB
-
-        let actual = fixture.into_tool_output(
-            ToolKind::FsSearch,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_fs_search_very_lengthy_one_line_match() {
-        let mut matches = Vec::new();
-        let total_lines = 1; // Total lines found.
-        for i in 1..=total_lines {
-            matches.push(Match {
-                path: "/home/user/project/foo.txt".to_string(),
-                result: Some(MatchResult::Found {
-                    line: format!(
-                        "Match line {}: {}",
-                        i,
-                        "abcdefghijklmnopqrstuvwxyz".repeat(40)
-                    ),
-                    line_number: Some(i),
-                }),
-            });
-        }
-
-        let fixture = ToolOperation::FsSearch {
-            input: forge_domain::FSSearch {
-                path: Some("/home/user/project".to_string()),
-                pattern: "search".to_string(),
-                glob: Some("*.txt".to_string()),
-                ..Default::default()
-            },
-            output: Some(SearchResult { matches }),
-        };
-
-        let env = fixture_environment();
-        let mut config = fixture_config();
-        // Total lines found are 50, but we limit to 20 for this test
-        config.max_search_lines = 20;
-        let max_bytes: f64 = 0.001 * 1024.0 * 1024.0;
-        config.max_search_result_bytes = max_bytes.ceil() as usize; // limit to 0.001 MB
-
-        let actual = fixture.into_tool_output(
-            ToolKind::FsSearch,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_fs_search_no_matches() {
-        let fixture = ToolOperation::FsSearch {
-            input: forge_domain::FSSearch {
-                path: Some("/home/user/empty_project".to_string()),
-                pattern: "nonexistent".to_string(),
-                ..Default::default()
-            },
-            output: None,
-        };
-
-        let env = fixture_environment();
-        let config = fixture_config();
-
-        let actual = fixture.into_tool_output(
-            ToolKind::FsSearch,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
+        let actual = fixture.into_tool_output(ToolKind::Write, &env, &mut Metrics::default());
 
         insta::assert_snapshot!(to_value(actual));
     }
@@ -1429,15 +614,8 @@ mod tests {
         };
 
         let env = fixture_environment();
-        let config = fixture_config();
 
-        let actual = fixture.into_tool_output(
-            ToolKind::Write,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
+        let actual = fixture.into_tool_output(ToolKind::Write, &env, &mut Metrics::default());
 
         insta::assert_snapshot!(to_value(actual));
     }
@@ -1465,15 +643,8 @@ mod tests {
         };
 
         let env = fixture_environment();
-        let config = fixture_config();
 
-        let actual = fixture.into_tool_output(
-            ToolKind::Write,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
+        let actual = fixture.into_tool_output(ToolKind::Write, &env, &mut Metrics::default());
 
         insta::assert_snapshot!(to_value(actual));
     }
@@ -1490,493 +661,8 @@ mod tests {
         };
 
         let env = fixture_environment();
-        let config = fixture_config();
 
-        let actual = fixture.into_tool_output(
-            ToolKind::Remove,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_fs_search_with_results() {
-        let fixture = ToolOperation::FsSearch {
-            input: forge_domain::FSSearch {
-                path: Some("/home/user/project".to_string()),
-                pattern: "Hello".to_string(),
-                glob: Some("*.txt".to_string()),
-                ..Default::default()
-            },
-            output: Some(SearchResult {
-                matches: vec![
-                    Match {
-                        path: "file1.txt".to_string(),
-                        result: Some(MatchResult::Found {
-                            line_number: Some(1),
-                            line: "Hello world".to_string(),
-                        }),
-                    },
-                    Match {
-                        path: "file2.txt".to_string(),
-                        result: Some(MatchResult::Found {
-                            line_number: Some(3),
-                            line: "Hello universe".to_string(),
-                        }),
-                    },
-                ],
-            }),
-        };
-
-        let env = fixture_environment();
-        let config = fixture_config();
-
-        let actual = fixture.into_tool_output(
-            ToolKind::FsSearch,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_fs_search_with_offset() {
-        // Create 50 matches to test offset and pagination
-        let mut matches = Vec::new();
-        let total_lines = 50;
-        for i in 1..=total_lines {
-            matches.push(Match {
-                path: "/home/user/project/foo.txt".to_string(),
-                result: Some(MatchResult::Found {
-                    line: format!("Match line {}: Test", i),
-                    line_number: Some(i),
-                }),
-            });
-        }
-
-        let fixture = ToolOperation::FsSearch {
-            input: forge_domain::FSSearch {
-                path: Some("/home/user/project".to_string()),
-                pattern: "search".to_string(),
-                glob: Some("*.txt".to_string()),
-                offset: Some(10),     // Skip first 10 matches
-                head_limit: Some(15), // Take 15 matches after offset
-                ..Default::default()
-            },
-            output: Some(SearchResult { matches }),
-        };
-
-        let env = fixture_environment(); // max_search_lines is 25
-        let config = fixture_config();
-
-        let actual = fixture.into_tool_output(
-            ToolKind::FsSearch,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_fs_search_files_with_matches_mode() {
-        let fixture = ToolOperation::FsSearch {
-            input: forge_domain::FSSearch {
-                path: Some("/home/user/project".to_string()),
-                pattern: "test".to_string(),
-                output_mode: Some(forge_domain::OutputMode::FilesWithMatches),
-                ..Default::default()
-            },
-            output: Some(SearchResult {
-                matches: vec![
-                    Match {
-                        path: "/home/user/project/file1.rs".to_string(),
-                        result: Some(MatchResult::FileMatch),
-                    },
-                    Match {
-                        path: "/home/user/project/file2.rs".to_string(),
-                        result: Some(MatchResult::FileMatch),
-                    },
-                ],
-            }),
-        };
-
-        let env = fixture_environment();
-        let config = fixture_config();
-
-        let actual = fixture.into_tool_output(
-            ToolKind::FsSearch,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_fs_search_count_mode() {
-        let fixture = ToolOperation::FsSearch {
-            input: forge_domain::FSSearch {
-                path: Some("/home/user/project".to_string()),
-                pattern: "test".to_string(),
-                output_mode: Some(forge_domain::OutputMode::Count),
-                ..Default::default()
-            },
-            output: Some(SearchResult {
-                matches: vec![
-                    Match {
-                        path: "/home/user/project/file1.rs".to_string(),
-                        result: Some(MatchResult::Count { count: 5 }),
-                    },
-                    Match {
-                        path: "/home/user/project/file2.rs".to_string(),
-                        result: Some(MatchResult::Count { count: 3 }),
-                    },
-                    Match {
-                        path: "/home/user/project/file3.rs".to_string(),
-                        result: Some(MatchResult::Count { count: 12 }),
-                    },
-                ],
-            }),
-        };
-
-        let env = fixture_environment();
-        let config = fixture_config();
-
-        let actual = fixture.into_tool_output(
-            ToolKind::FsSearch,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_fs_search_with_context_lines() {
-        let fixture = ToolOperation::FsSearch {
-            input: forge_domain::FSSearch {
-                path: Some("/home/user/project".to_string()),
-                pattern: "MATCH".to_string(),
-                context: Some(2), // 2 lines before and after
-                ..Default::default()
-            },
-            output: Some(SearchResult {
-                matches: vec![Match {
-                    path: "/home/user/project/test.txt".to_string(),
-                    result: Some(MatchResult::ContextMatch {
-                        line_number: Some(10),
-                        line: "This is the MATCH line".to_string(),
-                        before_context: vec![
-                            "line 8 before context".to_string(),
-                            "line 9 before context".to_string(),
-                        ],
-                        after_context: vec![
-                            "line 11 after context".to_string(),
-                            "line 12 after context".to_string(),
-                        ],
-                    }),
-                }],
-            }),
-        };
-
-        let env = fixture_environment();
-        let config = fixture_config();
-
-        let actual = fixture.into_tool_output(
-            ToolKind::FsSearch,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_fs_search_with_before_context() {
-        let fixture = ToolOperation::FsSearch {
-            input: forge_domain::FSSearch {
-                path: Some("/home/user/project".to_string()),
-                pattern: "ERROR".to_string(),
-                before_context: Some(3), // 3 lines before
-                ..Default::default()
-            },
-            output: Some(SearchResult {
-                matches: vec![Match {
-                    path: "/home/user/project/log.txt".to_string(),
-                    result: Some(MatchResult::ContextMatch {
-                        line_number: Some(50),
-                        line: "ERROR: Something went wrong".to_string(),
-                        before_context: vec![
-                            "line 47: INFO startup".to_string(),
-                            "line 48: DEBUG processing".to_string(),
-                            "line 49: WARN slow operation".to_string(),
-                        ],
-                        after_context: vec![],
-                    }),
-                }],
-            }),
-        };
-
-        let env = fixture_environment();
-        let config = fixture_config();
-
-        let actual = fixture.into_tool_output(
-            ToolKind::FsSearch,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_fs_search_with_after_context() {
-        let fixture = ToolOperation::FsSearch {
-            input: forge_domain::FSSearch {
-                path: Some("/home/user/project".to_string()),
-                pattern: "TODO".to_string(),
-                after_context: Some(2), // 2 lines after
-                ..Default::default()
-            },
-            output: Some(SearchResult {
-                matches: vec![Match {
-                    path: "/home/user/project/src/main.rs".to_string(),
-                    result: Some(MatchResult::ContextMatch {
-                        line_number: Some(15),
-                        line: "// TODO: Implement this feature".to_string(),
-                        before_context: vec![],
-                        after_context: vec![
-                            "fn main() {".to_string(),
-                            "    println!(\"Hello\");".to_string(),
-                        ],
-                    }),
-                }],
-            }),
-        };
-
-        let env = fixture_environment();
-        let config = fixture_config();
-
-        let actual = fixture.into_tool_output(
-            ToolKind::FsSearch,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_fs_search_without_line_numbers() {
-        let fixture = ToolOperation::FsSearch {
-            input: forge_domain::FSSearch {
-                path: Some("/home/user/project".to_string()),
-                pattern: "function".to_string(),
-                show_line_numbers: Some(false),
-                ..Default::default()
-            },
-            output: Some(SearchResult {
-                matches: vec![
-                    Match {
-                        path: "/home/user/project/app.js".to_string(),
-                        result: Some(MatchResult::Found {
-                            line_number: None, // No line number when disabled
-                            line: "function doSomething() {".to_string(),
-                        }),
-                    },
-                    Match {
-                        path: "/home/user/project/utils.js".to_string(),
-                        result: Some(MatchResult::Found {
-                            line_number: None,
-                            line: "function helper() {".to_string(),
-                        }),
-                    },
-                ],
-            }),
-        };
-
-        let env = fixture_environment();
-        let config = fixture_config();
-
-        let actual = fixture.into_tool_output(
-            ToolKind::FsSearch,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_fs_search_with_file_type() {
-        let fixture = ToolOperation::FsSearch {
-            input: forge_domain::FSSearch {
-                path: Some("/home/user/project".to_string()),
-                pattern: "class".to_string(),
-                file_type: Some("py".to_string()), // Python files only
-                ..Default::default()
-            },
-            output: Some(SearchResult {
-                matches: vec![
-                    Match {
-                        path: "/home/user/project/models.py".to_string(),
-                        result: Some(MatchResult::Found {
-                            line_number: Some(1),
-                            line: "class User:".to_string(),
-                        }),
-                    },
-                    Match {
-                        path: "/home/user/project/views.py".to_string(),
-                        result: Some(MatchResult::Found {
-                            line_number: Some(5),
-                            line: "class HomeView:".to_string(),
-                        }),
-                    },
-                ],
-            }),
-        };
-
-        let env = fixture_environment();
-        let config = fixture_config();
-
-        let actual = fixture.into_tool_output(
-            ToolKind::FsSearch,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_fs_search_case_insensitive() {
-        let fixture = ToolOperation::FsSearch {
-            input: forge_domain::FSSearch {
-                path: Some("/home/user/project".to_string()),
-                pattern: "error".to_string(),
-                case_insensitive: Some(true),
-                ..Default::default()
-            },
-            output: Some(SearchResult {
-                matches: vec![
-                    Match {
-                        path: "/home/user/project/log.txt".to_string(),
-                        result: Some(MatchResult::Found {
-                            line_number: Some(10),
-                            line: "ERROR: Connection failed".to_string(),
-                        }),
-                    },
-                    Match {
-                        path: "/home/user/project/log.txt".to_string(),
-                        result: Some(MatchResult::Found {
-                            line_number: Some(15),
-                            line: "error in processing".to_string(),
-                        }),
-                    },
-                    Match {
-                        path: "/home/user/project/log.txt".to_string(),
-                        result: Some(MatchResult::Found {
-                            line_number: Some(20),
-                            line: "Error: Invalid input".to_string(),
-                        }),
-                    },
-                ],
-            }),
-        };
-
-        let env = fixture_environment();
-        let config = fixture_config();
-
-        let actual = fixture.into_tool_output(
-            ToolKind::FsSearch,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_fs_search_multiline_pattern() {
-        let fixture = ToolOperation::FsSearch {
-            input: forge_domain::FSSearch {
-                path: Some("/home/user/project".to_string()),
-                pattern: "struct.*\\{.*field".to_string(),
-                multiline: Some(true),
-                ..Default::default()
-            },
-            output: Some(SearchResult {
-                matches: vec![Match {
-                    path: "/home/user/project/types.rs".to_string(),
-                    result: Some(MatchResult::Found {
-                        line_number: Some(10),
-                        line: "struct User {\n    field: String".to_string(),
-                    }),
-                }],
-            }),
-        };
-
-        let env = fixture_environment();
-        let config = fixture_config();
-
-        let actual = fixture.into_tool_output(
-            ToolKind::FsSearch,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_fs_search_no_results() {
-        let fixture = ToolOperation::FsSearch {
-            input: forge_domain::FSSearch {
-                path: Some("/home/user/project".to_string()),
-                pattern: "NonExistentPattern".to_string(),
-                ..Default::default()
-            },
-            output: None,
-        };
-
-        let env = fixture_environment();
-        let config = fixture_config();
-
-        let actual = fixture.into_tool_output(
-            ToolKind::FsSearch,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
+        let actual = fixture.into_tool_output(ToolKind::Remove, &env, &mut Metrics::default());
 
         insta::assert_snapshot!(to_value(actual));
     }
@@ -2000,15 +686,8 @@ mod tests {
         };
 
         let env = fixture_environment();
-        let config = fixture_config();
 
-        let actual = fixture.into_tool_output(
-            ToolKind::Patch,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
+        let actual = fixture.into_tool_output(ToolKind::Patch, &env, &mut Metrics::default());
 
         insta::assert_snapshot!(to_value(actual));
     }
@@ -2032,15 +711,8 @@ mod tests {
         };
 
         let env = fixture_environment();
-        let config = fixture_config();
 
-        let actual = fixture.into_tool_output(
-            ToolKind::Patch,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
+        let actual = fixture.into_tool_output(ToolKind::Patch, &env, &mut Metrics::default());
 
         insta::assert_snapshot!(to_value(actual));
     }
@@ -2072,15 +744,8 @@ mod tests {
         };
 
         let env = fixture_environment();
-        let config = fixture_config();
 
-        let actual = fixture.into_tool_output(
-            ToolKind::Patch,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
+        let actual = fixture.into_tool_output(ToolKind::Patch, &env, &mut Metrics::default());
 
         insta::assert_snapshot!(to_value(actual));
     }
@@ -2097,15 +762,8 @@ mod tests {
         };
 
         let env = fixture_environment();
-        let config = fixture_config();
 
-        let actual = fixture.into_tool_output(
-            ToolKind::Undo,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
+        let actual = fixture.into_tool_output(ToolKind::Undo, &env, &mut Metrics::default());
 
         insta::assert_snapshot!(to_value(actual));
     }
@@ -2122,15 +780,8 @@ mod tests {
         };
 
         let env = fixture_environment();
-        let config = fixture_config();
 
-        let actual = fixture.into_tool_output(
-            ToolKind::Undo,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
+        let actual = fixture.into_tool_output(ToolKind::Undo, &env, &mut Metrics::default());
 
         insta::assert_snapshot!(to_value(actual));
     }
@@ -2149,15 +800,8 @@ mod tests {
         };
 
         let env = fixture_environment();
-        let config = fixture_config();
 
-        let actual = fixture.into_tool_output(
-            ToolKind::Undo,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
+        let actual = fixture.into_tool_output(ToolKind::Undo, &env, &mut Metrics::default());
 
         insta::assert_snapshot!(to_value(actual));
     }
@@ -2174,15 +818,8 @@ mod tests {
         };
 
         let env = fixture_environment();
-        let config = fixture_config();
 
-        let actual = fixture.into_tool_output(
-            ToolKind::Undo,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
+        let actual = fixture.into_tool_output(ToolKind::Undo, &env, &mut Metrics::default());
 
         insta::assert_snapshot!(to_value(actual));
     }
@@ -2199,149 +836,8 @@ mod tests {
         };
 
         let env = fixture_environment();
-        let config = fixture_config();
 
-        let actual = fixture.into_tool_output(
-            ToolKind::Undo,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_net_fetch_success() {
-        let fixture = ToolOperation::NetFetch {
-            input: forge_domain::NetFetch {
-                url: "https://example.com".to_string(),
-                raw: Some(false),
-            },
-            output: HttpResponse {
-                content: "# Example Website\n\nThis is some content from a website.".to_string(),
-                code: 200,
-                context: ResponseContext::Raw,
-                content_type: "text/plain".to_string(),
-            },
-        };
-
-        let env = fixture_environment();
-        let config = fixture_config();
-
-        let actual = fixture.into_tool_output(
-            ToolKind::Fetch,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_net_fetch_truncated() {
-        let env = fixture_environment();
-        let config = fixture_config();
-        let truncated_content = "Truncated Content".to_string();
-        let long_content = format!(
-            "{}{}",
-            "A".repeat(config.max_fetch_chars),
-            truncated_content
-        );
-        let fixture = ToolOperation::NetFetch {
-            input: forge_domain::NetFetch {
-                url: "https://example.com/large-page".to_string(),
-                raw: Some(false),
-            },
-            output: HttpResponse {
-                content: long_content,
-                code: 200,
-                context: ResponseContext::Parsed,
-                content_type: "text/html".to_string(),
-            },
-        };
-
-        let truncation_path =
-            TempContentFiles::default().stdout(PathBuf::from("/tmp/forge_fetch_abc123.txt"));
-
-        let actual = fixture.into_tool_output(
-            ToolKind::Fetch,
-            truncation_path,
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        // make sure that the content is truncated
-        assert!(
-            !actual
-                .values
-                .first()
-                .unwrap()
-                .as_str()
-                .unwrap()
-                .ends_with(&truncated_content)
-        );
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_shell_success() {
-        let fixture = ToolOperation::Shell {
-            output: ShellOutput {
-                output: forge_domain::CommandOutput {
-                    command: "ls -la".to_string(),
-                    stdout: "total 8\ndrwxr-xr-x  2 user user 4096 Jan  1 12:00 .\ndrwxr-xr-x 10 user user 4096 Jan  1 12:00 ..".to_string(),
-                    stderr: "".to_string(),
-                    exit_code: Some(0),
-                },
-                shell: "/bin/bash".to_string(),
-                description: None,
-            },
-        };
-
-        let env = fixture_environment();
-        let config = fixture_config();
-
-        let actual = fixture.into_tool_output(
-            ToolKind::Shell,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
-
-        insta::assert_snapshot!(to_value(actual));
-    }
-
-    #[test]
-    fn test_shell_with_description() {
-        let fixture = ToolOperation::Shell {
-            output: ShellOutput {
-                output: forge_domain::CommandOutput {
-                    command: "git status".to_string(),
-                    stdout: "On branch main\nnothing to commit, working tree clean".to_string(),
-                    stderr: "".to_string(),
-                    exit_code: Some(0),
-                },
-                shell: "/bin/bash".to_string(),
-                description: Some("Shows working tree status".to_string()),
-            },
-        };
-
-        let env = fixture_environment();
-        let config = fixture_config();
-
-        let actual = fixture.into_tool_output(
-            ToolKind::Shell,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
+        let actual = fixture.into_tool_output(ToolKind::Undo, &env, &mut Metrics::default());
 
         insta::assert_snapshot!(to_value(actual));
     }
@@ -2362,15 +858,8 @@ mod tests {
         };
 
         let env = fixture_environment();
-        let config = fixture_config();
 
-        let actual = fixture.into_tool_output(
-            ToolKind::Skill,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
+        let actual = fixture.into_tool_output(ToolKind::Skill, &env, &mut Metrics::default());
 
         insta::assert_snapshot!(to_value(actual));
     }
@@ -2395,14 +884,7 @@ mod tests {
         };
 
         let env = fixture_environment();
-        let config = fixture_config();
-        let actual = fixture.into_tool_output(
-            ToolKind::Read,
-            TempContentFiles::default(),
-            &env,
-            &config,
-            &mut Metrics::default(),
-        );
+        let actual = fixture.into_tool_output(ToolKind::Read, &env, &mut Metrics::default());
 
         // Should return image content
         assert!(!actual.values.is_empty(), "Expected non-empty output");

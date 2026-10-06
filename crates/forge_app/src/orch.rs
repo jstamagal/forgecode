@@ -114,6 +114,8 @@ pub struct Orchestrator<S> {
     error_tracker: ToolErrorTracker,
     hook: Arc<Hook>,
     config: forge_config::ForgeConfig,
+    /// `task` nesting depth of this conversation (0 = the user's own).
+    task_depth: usize,
 }
 
 impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orchestrator<S> {
@@ -133,6 +135,7 @@ impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orc
             models: Default::default(),
             error_tracker: Default::default(),
             hook: Arc::new(Hook::default()),
+            task_depth: 0,
         }
     }
 
@@ -408,7 +411,8 @@ impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orc
         let max_requests_per_turn = self.agent.max_requests_per_turn;
         let tool_context = ToolCallContext::new(self.conversation.metrics.clone())
             .sender(self.sender.clone())
-            .with_conversation_id(self.conversation.id);
+            .with_conversation_id(self.conversation.id)
+            .with_task_depth(self.task_depth);
 
         while !should_yield {
             // Set context for the current loop iteration

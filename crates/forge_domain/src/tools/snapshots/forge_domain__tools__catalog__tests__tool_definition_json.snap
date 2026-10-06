@@ -79,63 +79,68 @@ expression: tools
 {
   "type": "object",
   "properties": {
-    "-A": {
-      "description": "Number of lines to show after each match (rg -A). Requires output_mode:\n\"content\", ignored otherwise.",
-      "type": "integer",
-      "format": "uint32",
-      "minimum": 0,
-      "nullable": true
-    },
-    "-B": {
-      "description": "Number of lines to show before each match (rg -B). Requires output_mode:\n\"content\", ignored otherwise.",
-      "type": "integer",
-      "format": "uint32",
-      "minimum": 0,
-      "nullable": true
-    },
-    "-C": {
-      "description": "Number of lines to show before and after each match (rg -C). Requires\noutput_mode: \"content\", ignored otherwise.",
-      "type": "integer",
-      "format": "uint32",
-      "minimum": 0,
-      "nullable": true
-    },
-    "-i": {
-      "description": "Case insensitive search (rg -i)",
+    "case_insensitive": {
+      "description": "Match without case sensitivity.",
       "type": "boolean",
       "nullable": true
     },
-    "-n": {
-      "description": "Show line numbers in output (rg -n). Requires output_mode: \"content\",\nignored otherwise.",
-      "type": "boolean",
+    "context": {
+      "description": "Lines of context before and after each match (content mode).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0,
+      "nullable": true
+    },
+    "context_after": {
+      "description": "Lines of context after each match (content mode).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0,
+      "nullable": true
+    },
+    "context_before": {
+      "description": "Lines of context before each match (content mode).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0,
+      "nullable": true
+    },
+    "file_type": {
+      "description": "File type, e.g. rust, py, js (ripgrep type names).",
+      "type": "string",
       "nullable": true
     },
     "glob": {
-      "description": "Glob pattern to filter files (e.g. \"*.js\", \"*.{ts,tsx}\") - maps to rg\n--glob",
+      "description": "Glob filter on paths (e.g. \"*.rs\", \"*.{ts,tsx}\", \"!*.min.js\").",
       "type": "string",
       "nullable": true
     },
     "head_limit": {
-      "description": "Limit output to first N lines/entries, equivalent to \"| head -N\". Works\nacross all output modes: content (limits output lines),\nfiles_with_matches (limits file paths), count (limits count entries).\nWhen unspecified, shows all results from ripgrep.",
+      "description": "Maximum result entries after `offset`.",
       "type": "integer",
       "format": "uint32",
-      "minimum": 0,
+      "minimum": 1,
+      "nullable": true
+    },
+    "line_numbers": {
+      "description": "Prefix content lines with their line numbers (default true).",
+      "type": "boolean",
       "nullable": true
     },
     "multiline": {
-      "description": "Enable multiline mode where . matches newlines and patterns can span\nlines (rg -U --multiline-dotall). Default: false.",
+      "description": "Let the regex span lines (`.` matches newlines).",
       "type": "boolean",
       "nullable": true
     },
     "offset": {
-      "description": "Skip first N lines/entries before applying head_limit",
+      "description": "Result entries to skip before `head_limit`.",
       "type": "integer",
       "format": "uint32",
       "minimum": 0,
       "nullable": true
     },
     "output_mode": {
-      "description": "Output mode: \"content\" shows matching lines (supports -A/-B/-C context,\n-n line numbers, head_limit), \"files_with_matches\" shows file paths\n(supports head_limit), \"count\" shows match counts (supports head_limit).\nDefaults to \"files_with_matches\".",
+      "description": "\"content\" (matching lines), \"files_with_matches\" (paths, default) or\n\"count\" (matches per file).",
       "type": "string",
       "enum": [
         "content",
@@ -146,16 +151,51 @@ expression: tools
       "nullable": true
     },
     "path": {
-      "description": "File or directory to search in (rg PATH). Defaults to current working\ndirectory.",
+      "description": "File or directory to search (default: the current directory).",
       "type": "string",
       "nullable": true
     },
     "pattern": {
-      "description": "The regular expression pattern to search for in file contents.",
+      "description": "Regex to search file contents for.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "pattern"
+  ]
+}
+{
+  "description": "Input for the `ast_search` tool: structural search and rewrite.",
+  "type": "object",
+  "properties": {
+    "apply": {
+      "description": "Write the rewrite (default false).",
+      "type": "boolean"
+    },
+    "language": {
+      "description": "Language (e.g. rust, python, typescript, tsx, go, c, cpp); inferred\nfrom each file's extension when omitted.",
+      "type": "string",
+      "nullable": true
+    },
+    "max_results": {
+      "description": "Most matches reported (default 200); an apply with more matches is\nrefused.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 1,
+      "nullable": true
+    },
+    "path": {
+      "description": "File or directory to search (default: the current directory).",
+      "type": "string",
+      "nullable": true
+    },
+    "pattern": {
+      "description": "ast-grep pattern; `$NAME` matches one node, `$$$NAME` zero or more.",
       "type": "string"
     },
-    "type": {
-      "description": "File type to search (rg --type). Common types: js, py, rust, go, java,\netc. More efficient than include for standard file types.",
+    "rewrite": {
+      "description": "Replacement template using the pattern's metavariables; without\n`apply` the result is a diff and nothing is written.",
       "type": "string",
       "nullable": true
     }
@@ -256,49 +296,113 @@ expression: tools
 {
   "type": "object",
   "properties": {
+    "action": {
+      "description": "run (default), poll, wait or kill.",
+      "oneOf": [
+        {
+          "description": "Start `command` and wait up to `timeout` seconds for it.",
+          "type": "string",
+          "const": "run"
+        },
+        {
+          "description": "Report a running job's new output without waiting.",
+          "type": "string",
+          "const": "poll"
+        },
+        {
+          "description": "Wait up to `timeout` more seconds for a running job.",
+          "type": "string",
+          "const": "wait"
+        },
+        {
+          "description": "Stop a running job (SIGTERM, then SIGKILL, to its process group).",
+          "type": "string",
+          "const": "kill"
+        }
+      ]
+    },
     "command": {
-      "description": "The shell command to execute.",
-      "type": "string"
+      "description": "The command to run (required for action \"run\").",
+      "type": "string",
+      "default": ""
     },
     "cwd": {
-      "description": "The working directory where the command should be executed.\nIf not specified, defaults to the current working directory from the\nenvironment.",
+      "description": "Working directory for the command (default: the current directory).",
       "type": "string",
       "nullable": true
     },
     "description": {
-      "description": "Clear, concise description of what this command does. Recommended to be\n5-10 words for simple commands. For complex commands with pipes or\nmultiple operations, provide more context. Examples: \"Lists files in\ncurrent directory\", \"Installs package dependencies\", \"Compiles Rust\nproject with release optimizations\".",
+      "description": "Short description of what the command does.",
       "type": "string",
       "nullable": true
     },
     "env": {
-      "description": "Environment variable names to pass to command execution (e.g., [\"PATH\",\n\"HOME\", \"USER\"]). The system automatically reads the specified\nvalues and applies them during command execution.",
+      "description": "Extra environment variable names to pass through, on top of the\nconfigured allow-list.",
       "type": "array",
       "items": {
         "type": "string"
       },
       "nullable": true
     },
+    "handle": {
+      "description": "Job id from a `HANDLE n RUNNING` line, for poll/wait/kill (default:\nthe most recent running job).",
+      "type": "string",
+      "nullable": true
+    },
     "keep_ansi": {
-      "description": "Whether to preserve ANSI escape codes in the output.\nIf true, ANSI escape codes will be preserved in the output.\nIf false (default), ANSI escape codes will be stripped from the output.",
+      "description": "Keep ANSI escape codes in the output (default false).",
       "type": "boolean"
+    },
+    "timeout": {
+      "description": "Seconds to wait before returning a handle (run) or to keep waiting\n(wait); default 30. The command is never killed when the window ends.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 1,
+      "nullable": true
     }
   },
-  "additionalProperties": false,
-  "required": [
-    "command"
-  ]
+  "additionalProperties": false
 }
 {
   "description": "Input type for the net fetch tool",
   "type": "object",
   "properties": {
+    "body": {
+      "description": "Request body text.",
+      "type": "string",
+      "nullable": true
+    },
+    "headers": {
+      "description": "Request headers, name to value.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "nullable": true
+    },
+    "json_body": {
+      "description": "Request body as JSON (sets Content-Type: application/json); not with\n`body`.",
+      "type": "object",
+      "additionalProperties": true,
+      "nullable": true
+    },
+    "method": {
+      "description": "HTTP method (default GET).",
+      "type": "string",
+      "nullable": true
+    },
     "raw": {
-      "description": "Get raw content without any markdown conversion (default: false)",
+      "description": "Return the body as is, without HTML-to-markdown conversion (default\nfalse).",
       "type": "boolean",
       "nullable": true
     },
+    "save": {
+      "description": "Stream the response body to this path instead of returning it; no size\nlimit, resumable.",
+      "type": "string",
+      "nullable": true
+    },
     "url": {
-      "description": "URL to fetch",
+      "description": "URL to fetch: http(s):// or file://.",
       "type": "string"
     }
   },
@@ -388,26 +492,70 @@ expression: tools
   "description": "Input structure for the Task tool - delegates work to specialized agents",
   "type": "object",
   "properties": {
+    "action": {
+      "description": "run (default), poll, wait or kill; poll/wait/kill act on a background\ntask's handle.",
+      "oneOf": [
+        {
+          "description": "Start `command` and wait up to `timeout` seconds for it.",
+          "type": "string",
+          "const": "run"
+        },
+        {
+          "description": "Report a running job's new output without waiting.",
+          "type": "string",
+          "const": "poll"
+        },
+        {
+          "description": "Wait up to `timeout` more seconds for a running job.",
+          "type": "string",
+          "const": "wait"
+        },
+        {
+          "description": "Stop a running job (SIGTERM, then SIGKILL, to its process group).",
+          "type": "string",
+          "const": "kill"
+        }
+      ]
+    },
     "agent_id": {
-      "description": "The ID of the specialized agent to delegate to (e.g., \"forge\", \"muse\",\n\"sage\")",
-      "type": "string"
+      "description": "The agent the workers run as (required to start workers).",
+      "type": "string",
+      "default": ""
+    },
+    "background": {
+      "description": "Run the workers in the background and return a handle at once.",
+      "type": "boolean"
+    },
+    "handle": {
+      "description": "Handle of a background task (default: your most recent running one).",
+      "type": "string",
+      "nullable": true
+    },
+    "model": {
+      "description": "Model the workers run on instead of the agent's configured model. Leave\nunset unless the user asks for it.",
+      "type": "string",
+      "nullable": true
     },
     "session_id": {
-      "description": "Optional session ID to continue an existing agent session. If not\nprovided, a new stateless session will be created. Use this to\nmaintain context across multiple task invocations with the same\nagent.",
+      "description": "Resume an earlier worker session (one task only). An unknown id is an\nerror.",
       "type": "string",
       "nullable": true
     },
     "tasks": {
-      "description": "A list of clear and detailed descriptions of the tasks to be performed\nby the agent in parallel. Provide sufficient context and specific\nrequirements to enable the agent to understand and execute the work\naccurately.",
+      "description": "Self-contained prompts, one per worker; they run in parallel (required\nto start workers).",
       "type": "array",
+      "default": [],
       "items": {
         "type": "string"
       }
+    },
+    "timeout": {
+      "description": "Seconds a wait blocks (default: until the task ends).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 1,
+      "nullable": true
     }
   },
-  "additionalProperties": false,
-  "required": [
-    "tasks",
-    "agent_id"
-  ]
+  "additionalProperties": false
 }

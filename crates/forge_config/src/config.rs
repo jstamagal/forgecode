@@ -122,26 +122,26 @@ pub struct ForgeConfig {
     /// Retry settings applied at the system level to all IO operations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetryConfig>,
-    /// Maximum number of lines returned by a single file search operation.
+    /// Environment variable names a `shell` command inherits without naming
+    /// them in its `env` argument. Unset means PATH, HOME, USER, LANG,
+    /// LC_ALL, TERM, PWD, SHELL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_env_allow: Option<Vec<String>>,
+    /// Shell output shown per call, stdout and stderr together; past it the
+    /// head and tail are shown and the whole stream is written to a file.
     #[serde(default)]
-    pub max_search_lines: usize,
-    /// Maximum number of bytes returned by a single file search operation.
+    pub max_bash_output_bytes: u64,
+    /// Maximum nesting depth of `task` workers (a worker's own task calls
+    /// count one level deeper).
     #[serde(default)]
-    pub max_search_result_bytes: usize,
-    /// Maximum number of characters returned from a URL fetch.
+    pub task_max_depth: usize,
+    /// Maximum workers one `task` call runs at once.
     #[serde(default)]
-    pub max_fetch_chars: usize,
-    /// Maximum number of lines captured from the leading portion of shell
-    /// command output.
+    pub subagent_max_workers: usize,
+    /// When true, the `task` tool refuses a `model` override; workers always
+    /// run on their agent's configured model.
     #[serde(default)]
-    pub max_stdout_prefix_lines: usize,
-    /// Maximum number of lines captured from the trailing portion of shell
-    /// command output.
-    #[serde(default)]
-    pub max_stdout_suffix_lines: usize,
-    /// Maximum number of characters per line in shell command output.
-    #[serde(default)]
-    pub max_stdout_line_chars: usize,
+    pub lock_subagent_model: bool,
     /// Maximum number of lines read from a file in a single operation.
     #[serde(default)]
     pub max_read_lines: u64,

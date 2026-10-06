@@ -73,15 +73,6 @@ pub struct TemplateConfig {
     /// Maximum image size in bytes accepted by the read tool (maps to
     /// `ForgeConfig::max_image_size_bytes`).
     pub max_image_size: usize,
-    /// Maximum prefix lines kept when truncating shell stdout (maps to
-    /// `ForgeConfig::max_stdout_prefix_lines`).
-    pub stdout_max_prefix_length: usize,
-    /// Maximum suffix lines kept when truncating shell stdout (maps to
-    /// `ForgeConfig::max_stdout_suffix_lines`).
-    pub stdout_max_suffix_length: usize,
-    /// Maximum characters per line in shell stdout before truncation (maps to
-    /// `ForgeConfig::max_stdout_line_chars`).
-    pub stdout_max_line_length: usize,
 }
 
 #[derive(Debug, Setters, Clone, PartialEq, Serialize, Deserialize)]

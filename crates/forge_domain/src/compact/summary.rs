@@ -328,6 +328,7 @@ fn extract_tool_info(call: &ToolCallFull, current_todos: &[Todo]) -> Option<Summ
                 let pattern = input.glob.or(input.file_type).unwrap_or(input.pattern);
                 Some(SummaryTool::Search { pattern })
             }
+            ToolCatalog::AstSearch(input) => Some(SummaryTool::Search { pattern: input.pattern }),
             ToolCatalog::Undo(input) => Some(SummaryTool::Undo { path: input.path }),
             ToolCatalog::Fetch(input) => Some(SummaryTool::Fetch { url: input.url }),
             ToolCatalog::Plan(input) => Some(SummaryTool::Plan { plan_name: input.plan_name }),

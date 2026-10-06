@@ -105,50 +105,6 @@ impl Content {
 }
 
 #[derive(Debug)]
-pub struct SearchResult {
-    pub matches: Vec<Match>,
-}
-
-#[derive(Debug)]
-pub struct Match {
-    pub path: String,
-    pub result: Option<MatchResult>,
-}
-
-#[derive(Debug)]
-pub enum MatchResult {
-    Error(String),
-    Found {
-        line_number: Option<usize>,
-        line: String,
-    },
-    Count {
-        count: usize,
-    },
-    FileMatch, // For files_with_matches mode
-    ContextMatch {
-        line_number: Option<usize>,
-        line: String,
-        before_context: Vec<String>,
-        after_context: Vec<String>,
-    },
-}
-
-#[derive(Debug)]
-pub struct HttpResponse {
-    pub content: String,
-    pub code: u16,
-    pub context: ResponseContext,
-    pub content_type: String,
-}
-
-#[derive(Debug)]
-pub enum ResponseContext {
-    Parsed,
-    Raw,
-}
-
-#[derive(Debug)]
 pub struct FsWriteOutput {
     pub path: String,
     // Set when the file already exists
@@ -526,17 +482,34 @@ pub trait FsRemoveService: Send + Sync {
 
 #[async_trait::async_trait]
 pub trait FsSearchService: Send + Sync {
-    /// Searches for files and content based on the provided parameters.
+    /// Searches file contents (or lists files with matches / counts) and
+    /// returns the model-facing text: absolute paths, `path:line:text`
+    /// content lines, a paging footer when `head_limit` cut the result.
     ///
     /// # Arguments
-    /// * `params` - Search parameters including pattern, path, output mode,
-    ///   etc.
+    /// * `params` - Search parameters; `path` must already be absolute.
     ///
-    /// # Returns
-    /// * `Ok(Some(SearchResult))` - Matches found
-    /// * `Ok(None)` - No matches found
-    /// * `Err(_)` - Search error
-    async fn search(&self, params: forge_domain::FSSearch) -> anyhow::Result<Option<SearchResult>>;
+    /// # Errors
+    /// Returns an error for a bad regex/glob/type, a missing path, or a search
+    /// that runs past its timeout.
+    async fn search(&self, params: forge_domain::FSSearch) -> anyhow::Result<String>;
+
+    /// The `ast_search` tool: structural matches with captures; with
+    /// `rewrite`, a unified-diff dry run; with `apply`, writes the rewrite
+    /// (snapshotting and re-reading every changed file into the read ledger).
+    ///
+    /// # Arguments
+    /// * `params` - Tool input; `path` must already be absolute.
+    /// * `context` - Tool call context (undo store, read ledger).
+    ///
+    /// # Errors
+    /// Returns an error for a missing path, an unknown language, a pattern
+    /// that does not parse, or an apply with more matches than `max_results`.
+    async fn ast_search(
+        &self,
+        params: forge_domain::AstSearch,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<String>;
 }
 
 #[async_trait::async_trait]
@@ -552,12 +525,49 @@ pub trait FsUndoService: Send + Sync {
         path: String,
         context: &forge_domain::ToolCallContext,
     ) -> anyhow::Result<FsUndoOutput>;
+
+    /// Records the current state of `path` (file, directory, symlink or
+    /// absence) as an undo entry before a tool other than write/patch/remove
+    /// changes it. Returns undo-store notices for the result.
+    ///
+    /// # Errors
+    /// Returns an error if the undo store cannot be opened.
+    async fn snapshot_before_write(
+        &self,
+        path: &std::path::Path,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<Vec<String>>;
+}
+
+/// A `fetch` tool request after argument resolution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FetchRequest {
+    /// http(s):// or file:// URL.
+    pub url: String,
+    /// Upper-case HTTP method.
+    pub method: String,
+    /// Request headers.
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// Request body text.
+    pub body: Option<String>,
+    /// Request body as JSON.
+    pub json_body: Option<serde_json::Value>,
+    /// Return the body without HTML conversion.
+    pub raw: bool,
+    /// Absolute path to stream the body to.
+    pub save: Option<PathBuf>,
+    /// Whether the model accepts image input.
+    pub vision: bool,
 }
 
 #[async_trait::async_trait]
 pub trait NetFetchService: Send + Sync {
-    /// Fetches content from a URL and returns it as a string.
-    async fn fetch(&self, url: String, raw: Option<bool>) -> anyhow::Result<HttpResponse>;
+    /// The `fetch` tool: any method, headers and body, `save` streaming with
+    /// resume, `file://`, binary descriptors and images.
+    ///
+    /// # Errors
+    /// Returns the error the model should see.
+    async fn fetch_tool(&self, request: FetchRequest) -> anyhow::Result<forge_domain::ToolOutput>;
 }
 
 #[async_trait::async_trait]
@@ -572,6 +582,14 @@ pub trait ShellService: Send + Sync {
         env_vars: Option<Vec<String>>,
         description: Option<String>,
     ) -> anyhow::Result<ShellOutput>;
+
+    /// The `shell` tool: run (with a wait window that returns a handle instead
+    /// of killing), poll, wait or kill. Returns the model-facing text.
+    ///
+    /// # Errors
+    /// Returns an error for a missing command, an unknown handle, or a shell
+    /// that cannot be spawned.
+    async fn shell_tool(&self, input: forge_domain::Shell, cwd: PathBuf) -> anyhow::Result<String>;
 }
 
 #[async_trait::async_trait]
@@ -969,8 +987,16 @@ impl<I: Services> FsRemoveService for I {
 
 #[async_trait::async_trait]
 impl<I: Services> FsSearchService for I {
-    async fn search(&self, params: forge_domain::FSSearch) -> anyhow::Result<Option<SearchResult>> {
+    async fn search(&self, params: forge_domain::FSSearch) -> anyhow::Result<String> {
         self.fs_search_service().search(params).await
+    }
+
+    async fn ast_search(
+        &self,
+        params: forge_domain::AstSearch,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<String> {
+        self.fs_search_service().ast_search(params, context).await
     }
 }
 
@@ -983,12 +1009,22 @@ impl<I: Services> FsUndoService for I {
     ) -> anyhow::Result<FsUndoOutput> {
         self.fs_undo_service().undo(path, context).await
     }
+
+    async fn snapshot_before_write(
+        &self,
+        path: &std::path::Path,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<Vec<String>> {
+        self.fs_undo_service()
+            .snapshot_before_write(path, context)
+            .await
+    }
 }
 
 #[async_trait::async_trait]
 impl<I: Services> NetFetchService for I {
-    async fn fetch(&self, url: String, raw: Option<bool>) -> anyhow::Result<HttpResponse> {
-        self.net_fetch_service().fetch(url, raw).await
+    async fn fetch_tool(&self, request: FetchRequest) -> anyhow::Result<forge_domain::ToolOutput> {
+        self.net_fetch_service().fetch_tool(request).await
     }
 }
 
@@ -1006,6 +1042,10 @@ impl<I: Services> ShellService for I {
         self.shell_service()
             .execute(command, cwd, keep_ansi, silent, env_vars, description)
             .await
+    }
+
+    async fn shell_tool(&self, input: forge_domain::Shell, cwd: PathBuf) -> anyhow::Result<String> {
+        self.shell_service().shell_tool(input, cwd).await
     }
 }
 

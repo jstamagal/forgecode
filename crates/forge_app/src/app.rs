@@ -35,10 +35,27 @@ pub(crate) fn build_template_config(config: &ForgeConfig) -> forge_domain::Templ
         max_read_size: config.max_read_lines as usize,
         max_read_bytes: config.max_read_bytes as usize,
         max_image_size: config.max_image_size_bytes as usize,
-        stdout_max_prefix_length: config.max_stdout_prefix_lines,
-        stdout_max_suffix_length: config.max_stdout_suffix_lines,
-        stdout_max_line_length: config.max_stdout_line_chars,
     }
+}
+
+/// Appends one droppable reminder per background `task` run of this
+/// conversation that finished since the last turn and has not been read.
+fn add_task_notes(mut conversation: Conversation, agent: &Agent) -> Conversation {
+    let notes = crate::tool_registry::task_jobs().completion_notes(&conversation.id);
+    if notes.is_empty() {
+        return conversation;
+    }
+    let mut context = conversation.context.take().unwrap_or_default();
+    for note in notes {
+        let text = forge_template::Element::new("system_reminder")
+            .text(note)
+            .to_string();
+        let message = TextMessage::new(Role::User, text)
+            .droppable(true)
+            .model(agent.model.clone());
+        context = context.add_message(ContextMessage::from(message));
+    }
+    conversation.context(context)
 }
 
 /// ForgeApp handles the core chat functionality by orchestrating various
@@ -89,6 +106,11 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ForgeAp
             .ok_or(crate::Error::AgentNotFound(agent_id.clone()))?
             .apply_config(&forge_config)
             .set_compact_model_if_none();
+        // A `task` worker may run on another model than its agent's.
+        let agent = match chat.model_override.clone() {
+            Some(model) => agent.model(model),
+            None => agent,
+        };
 
         let agent_provider = agent_provider_resolver
             .get_provider(Some(agent.id.clone()))
@@ -139,6 +161,9 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ForgeAp
             .update_file_stats(conversation)
             .await;
 
+        // T22: background tasks that finished unread since the last turn.
+        let conversation = add_task_notes(conversation, &agent);
+
         let conversation = InitConversationMetrics::new(current_time).apply(conversation);
         let conversation = ApplyTunableParameters::new(agent.clone(), tool_definitions.clone())
             .apply(conversation);
@@ -180,7 +205,8 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ForgeAp
         .error_tracker(ToolErrorTracker::new(max_tool_failure_per_turn))
         .tool_definitions(tool_definitions)
         .models(models)
-        .hook(Arc::new(hook));
+        .hook(Arc::new(hook))
+        .task_depth(chat.task_depth);
 
         // Create and return the stream
         let stream = MpscStream::spawn(
