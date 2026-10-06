@@ -38,9 +38,14 @@ pub(crate) fn build_template_config(config: &ForgeConfig) -> forge_domain::Templ
 }
 
 /// Appends one droppable reminder per background `task` run of this
-/// conversation that finished since the last turn and has not been read.
-fn add_task_notes(mut conversation: Conversation, agent: &Agent) -> Conversation {
-    let notes = crate::tool_registry::task_jobs().completion_notes(&conversation.id);
+/// conversation that finished since the last turn and has not been read, and
+/// (X19) one per queued hook output. Worker conversations (depth > 0) get
+/// only their own task notes.
+fn add_task_notes(mut conversation: Conversation, agent: &Agent, depth: usize) -> Conversation {
+    let mut notes = crate::tool_registry::task_jobs().completion_notes(&conversation.id);
+    if depth == 0 {
+        notes.extend(crate::user_hooks::take_reminders());
+    }
     if notes.is_empty() {
         return conversation;
     }
@@ -166,8 +171,9 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ForgeAp
             .update_file_stats(conversation)
             .await;
 
-        // T22: background tasks that finished unread since the last turn.
-        let conversation = add_task_notes(conversation, &agent);
+        // T22: background tasks that finished unread since the last turn;
+        // X19: queued hook output.
+        let conversation = add_task_notes(conversation, &agent, chat.task_depth);
 
         let conversation = InitConversationMetrics::new(current_time).apply(conversation);
         let conversation = ApplyTunableParameters::new(

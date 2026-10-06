@@ -857,15 +857,20 @@ impl NetFetch {
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
 #[tool_description_file = "crates/forge_domain/src/tools/descriptions/plan_create.md"]
 pub struct PlanCreate {
-    /// The name of the plan (will be used in the filename)
+    /// The name of the plan (sanitised into the filename).
     pub plan_name: String,
 
-    /// The version of the plan (e.g., "v1", "v2", "1.0")
+    /// The version of the plan (e.g., "v1", "v2", "1.0"; sanitised into the
+    /// filename).
     pub version: String,
 
-    /// The content to write to the plan file. This should be the complete
-    /// plan content in markdown format.
+    /// The complete plan content in markdown, written verbatim.
     pub content: String,
+
+    /// Replace an existing plan with the same name and version (default
+    /// false).
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub overwrite: bool,
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
@@ -1374,6 +1379,7 @@ impl ToolCatalog {
             plan_name: plan_name.to_string(),
             version: version.to_string(),
             content: content.to_string(),
+            overwrite: false,
         }))
     }
 

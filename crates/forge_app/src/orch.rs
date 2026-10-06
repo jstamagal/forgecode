@@ -416,6 +416,8 @@ impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orc
         self.hook
             .handle(&start_event, &mut self.conversation)
             .await?;
+        self.run_turn_hooks(forge_config::HookEvent::TurnStart)
+            .await;
 
         // Signals that the loop should suspend (task may or may not be
         // completed)
@@ -493,6 +495,22 @@ impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orc
             )
             .await?;
 
+            // X19: compaction runs inside the Response handler; pre_compact
+            // fires when it is about to, post_compact when it happened.
+            let will_compact = self.conversation.context.as_ref().is_some_and(|context| {
+                self.agent
+                    .compact
+                    .should_compact(context, *context.token_count())
+            });
+            let messages_before = self.conversation.len();
+            if will_compact {
+                self.run_observer_hooks(
+                    forge_config::HookEvent::PreCompact,
+                    serde_json::json!({"messages": messages_before}),
+                )
+                .await;
+            }
+
             // Fire the Response lifecycle event
             let response_event = LifecycleEvent::Response(EventData::new(
                 self.agent.clone(),
@@ -502,6 +520,24 @@ impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orc
             self.hook
                 .handle(&response_event, &mut self.conversation)
                 .await?;
+            if will_compact && self.conversation.len() < messages_before {
+                self.run_observer_hooks(
+                    forge_config::HookEvent::PostCompact,
+                    serde_json::json!({
+                        "messages_before": messages_before,
+                        "messages_after": self.conversation.len(),
+                    }),
+                )
+                .await;
+            }
+            self.run_observer_hooks(
+                forge_config::HookEvent::Response,
+                serde_json::json!({
+                    "content": message.content,
+                    "tool_calls": message.tool_calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+                }),
+            )
+            .await;
 
             // Turn is completed, if finish_reason is 'stop'. Gemini models
             // return stop as finish reason with tool calls.
@@ -615,6 +651,18 @@ impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orc
 
             self.error_tracker.adjust_record(&tool_call_records);
             let allowed_max_attempts = self.error_tracker.limit();
+            let failed: Vec<String> = tool_call_records
+                .iter()
+                .filter(|(_, result)| result.is_error())
+                .map(|(_, result)| result.name.to_string())
+                .collect();
+            if !failed.is_empty() {
+                self.run_observer_hooks(
+                    forge_config::HookEvent::Error,
+                    serde_json::json!({"failed_tools": failed}),
+                )
+                .await;
+            }
             for (_, result) in tool_call_records.iter_mut() {
                 if result.is_error() {
                     let attempts_left = self.error_tracker.remaining_attempts(&result.name);
@@ -720,6 +768,7 @@ impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orc
         }
 
         self.services.update(self.conversation.clone()).await?;
+        self.run_turn_hooks(forge_config::HookEvent::TurnEnd).await;
 
         // Signal Task Completion
         if is_complete {
@@ -727,6 +776,39 @@ impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orc
         }
 
         Ok(())
+    }
+
+    /// X19: runs the observing user hooks of `event` (exit status ignored).
+    /// X25: a `task` worker inherits only the refusing (`tool_call`) hooks,
+    /// so observers run for the user's own conversation only.
+    async fn run_turn_hooks(&self, event: forge_config::HookEvent) {
+        self.run_observer_hooks(event, serde_json::json!({})).await;
+    }
+
+    async fn run_observer_hooks(&self, event: forge_config::HookEvent, extra: serde_json::Value) {
+        if self.task_depth > 0 {
+            return;
+        }
+        let hooks: Vec<&forge_config::UserHook> =
+            crate::user_hooks::matching(&self.config.hooks, event, None).collect();
+        if hooks.is_empty() {
+            return;
+        }
+        let cwd = self.services.get_environment().cwd;
+        let mut payload = serde_json::json!({
+            "hook_event_name": event.name(),
+            "session_id": self.conversation.id.to_string(),
+            "agent_id": self.agent.id.as_str(),
+            "cwd": cwd,
+        });
+        if let (Some(map), serde_json::Value::Object(extra)) = (payload.as_object_mut(), extra) {
+            map.extend(extra);
+        }
+        for hook in hooks {
+            if let Err(error) = crate::user_hooks::run_and_queue(hook, &payload, &cwd).await {
+                tracing::warn!(command = %hook.command, %error, "hook failed to start");
+            }
+        }
     }
 
     fn get_model(&self) -> ModelId {

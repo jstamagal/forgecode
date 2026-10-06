@@ -311,6 +311,7 @@ impl<I: CommandInfra + EnvironmentInfra<Config = forge_config::ForgeConfig>> She
             keep_ansi: input.keep_ansi,
             cap: self.output_budget(),
             spill_dir,
+            jail: forge_domain::active_jail().cloned(),
         })?;
         let window = Duration::from_secs(input.timeout.unwrap_or(DEFAULT_WAIT_SECS).max(1));
         // A call that is cancelled (the turn is interrupted) drops this future;

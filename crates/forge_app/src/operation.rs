@@ -315,10 +315,16 @@ impl ToolOperation {
             ToolOperation::Text { text } => forge_domain::ToolOutput::text(text),
             ToolOperation::Output { output } => output,
             ToolOperation::PlanCreate { input, output } => {
+                let status = if output.before.is_some() {
+                    "replaced"
+                } else {
+                    "created"
+                };
                 let elm = Element::new("plan_created")
                     .attr("path", output.path.display().to_string())
                     .attr("plan_name", input.plan_name)
-                    .attr("version", input.version);
+                    .attr("version", input.version)
+                    .attr("status", status);
 
                 forge_domain::ToolOutput::text(elm)
             }

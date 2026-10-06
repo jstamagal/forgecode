@@ -52,6 +52,20 @@ impl<
         }
     }
 
+    /// [`Self::normalize_path`], then X20: under a jail the path must be
+    /// inside the jail (and writable when `write`); the refusal is a
+    /// [`forge_domain::ToolRefusal`] because retrying cannot change it.
+    fn confined(&self, path: String, write: bool) -> anyhow::Result<String> {
+        let path = self.normalize_path(path);
+        match forge_domain::active_jail() {
+            Some(jail) => jail
+                .confine(std::path::Path::new(&path), write)
+                .map(|_| path)
+                .map_err(|error| anyhow::Error::new(forge_domain::ToolRefusal(error.to_string()))),
+            None => Ok(path),
+        }
+    }
+
     async fn call_internal(
         &self,
         input: ToolCatalog,
@@ -59,7 +73,7 @@ impl<
     ) -> anyhow::Result<ToolOperation> {
         Ok(match input {
             ToolCatalog::Read(input) => {
-                let normalized_path = self.normalize_path(input.file_path.clone());
+                let normalized_path = self.confined(input.file_path.clone(), false)?;
                 let range = input.range.clone().unwrap_or_default();
                 let request = ReadRequest {
                     path: normalized_path,
@@ -75,7 +89,7 @@ impl<
                 (input, output).into()
             }
             ToolCatalog::Write(input) => {
-                let normalized_path = self.normalize_path(input.file_path.clone());
+                let normalized_path = self.confined(input.file_path.clone(), true)?;
                 let output = self
                     .services
                     .write_tool(
@@ -95,7 +109,7 @@ impl<
                     .clone()
                     .filter(|path| !path.is_empty())
                     .unwrap_or_else(|| self.services.get_environment().cwd.display().to_string());
-                params.path = Some(self.normalize_path(root));
+                params.path = Some(self.confined(root, false)?);
                 let text = self.services.search(params).await?;
                 ToolOperation::Output { output: ToolOutput::text(text) }
             }
@@ -106,12 +120,12 @@ impl<
                     .clone()
                     .filter(|path| !path.is_empty())
                     .unwrap_or_else(|| self.services.get_environment().cwd.display().to_string());
-                params.path = Some(self.normalize_path(root));
+                params.path = Some(self.confined(root, params.apply)?);
                 let text = self.services.ast_search(params, context).await?;
                 ToolOperation::Output { output: ToolOutput::text(text) }
             }
             ToolCatalog::Remove(input) => {
-                let normalized_path = self.normalize_path(input.path.clone());
+                let normalized_path = self.confined(input.path.clone(), true)?;
                 let output = self
                     .services
                     .remove(normalized_path, input.permanent, context)
@@ -119,7 +133,7 @@ impl<
                 (input, output).into()
             }
             ToolCatalog::Patch(input) => {
-                let normalized_path = self.normalize_path(input.file_path.clone());
+                let normalized_path = self.confined(input.file_path.clone(), true)?;
                 let edits = input.resolve_edits()?;
                 let output = self
                     .services
@@ -128,7 +142,7 @@ impl<
                 (input, output).into()
             }
             ToolCatalog::Undo(input) => {
-                let normalized_path = self.normalize_path(input.path.clone());
+                let normalized_path = self.confined(input.path.clone(), true)?;
                 let output = self.services.undo(normalized_path, context).await?;
                 (input, output).into()
             }
@@ -138,7 +152,7 @@ impl<
                     .clone()
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|| self.services.get_environment().cwd.display().to_string());
-                let normalized_cwd = self.normalize_path(cwd);
+                let normalized_cwd = self.confined(cwd, false)?;
                 let text = self
                     .services
                     .shell_tool(input, PathBuf::from(normalized_cwd))
@@ -149,7 +163,8 @@ impl<
                 let save = input
                     .save
                     .clone()
-                    .map(|path| PathBuf::from(self.normalize_path(path)));
+                    .map(|path| self.confined(path, true).map(PathBuf::from))
+                    .transpose()?;
                 if let Some(target) = &save {
                     // A save overwrites; snapshot it so undo brings it back.
                     self.services.snapshot_before_write(target, context).await?;
@@ -174,6 +189,8 @@ impl<
                         input.plan_name.clone(),
                         input.version.clone(),
                         input.content.clone(),
+                        input.overwrite,
+                        context,
                     )
                     .await?;
                 (input, output).into()

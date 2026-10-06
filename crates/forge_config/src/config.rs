@@ -147,6 +147,10 @@ pub struct ForgeConfig {
     /// whose `match` hits the model or provider id applies.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_alias_profiles: Vec<ToolAliasProfile>,
+    /// Directory the `plan` tool writes to; relative paths resolve against
+    /// the working directory. Unset means `{cwd}/plans`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plans_dir: Option<PathBuf>,
     /// MCP settings (per-agent server/tool policy).
     #[serde(default)]
     pub mcp: McpSettings,
@@ -276,6 +280,27 @@ pub struct ForgeConfig {
     /// explicit permission grants.
     #[serde(default)]
     pub restricted: bool,
+
+    /// X18: argument ban patterns, tool name → bans. A call whose argument
+    /// matches a ban's regex is refused before it runs. Always on, also
+    /// without `--restricted`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub tool_bans: std::collections::BTreeMap<String, Vec<crate::ToolBan>>,
+
+    /// X20: the jail directory (`--jail DIR`). When set, tool-spawned
+    /// processes run under `bwrap` with DIR read-write and the system
+    /// read-only, and file tools refuse paths outside DIR and `jail_bind`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jail: Option<PathBuf>,
+
+    /// X20: extra paths visible in the jail: `path` (read-only), `path:ro` or
+    /// `path:rw`; `~` expands to the home directory.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jail_bind: Vec<String>,
+
+    /// X19: user hooks run on tool calls, tool results and turn boundaries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hooks: Vec<crate::UserHook>,
 
     /// Whether tool use is supported in the current environment; when false,
     /// all tool calls are disabled.

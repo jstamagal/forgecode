@@ -175,6 +175,28 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ToolReg
     ) -> anyhow::Result<ToolOutput> {
         Self::validate_tool_call(agent, &input.name, context)?;
 
+        // X18: argument ban patterns are refused before anything runs (and
+        // are refusals: they do not count toward the failure limit).
+        let config = self.services.get_config()?;
+        if let Some(bans) = config.tool_bans.get(input.name.as_str())
+            && let Ok(arguments) = input.arguments.parse()
+            && let Some(refusal) = forge_domain::ban_refusal(
+                input.name.as_str(),
+                &arguments,
+                bans.iter().map(|ban| forge_domain::Ban {
+                    arg: ban.arg.as_deref(),
+                    pattern: &ban.pattern,
+                    reason: ban.reason.as_deref(),
+                }),
+            )
+        {
+            return Err(anyhow::Error::new(forge_domain::ToolRefusal(refusal)));
+        }
+        // X19: `tool_call` hooks may refuse the call (exit 2).
+        if let Some(refusal) = self.run_tool_call_hooks(agent, &input, context).await {
+            return Err(anyhow::Error::new(forge_domain::ToolRefusal(refusal)));
+        }
+
         tracing::info!(tool_name = %input.name, arguments = %input.arguments.clone().into_string(), "Executing tool call");
         let tool_name = input.name.clone();
 
@@ -641,7 +663,93 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ToolReg
             (output, _) => output,
         };
 
+        // X19: `tool_result` hooks see the call and its outcome; they cannot
+        // change it. X25: workers inherit only refusing hooks, so observers
+        // run for the user's own conversation only.
+        if context.task_depth() == 0
+            && let Ok(config) = self.services.get_config()
+            && crate::user_hooks::matching(
+                &config.hooks,
+                forge_config::HookEvent::ToolResult,
+                Some(tool_name.as_str()),
+            )
+            .next()
+            .is_some()
+        {
+            let payload = json!({
+                "hook_event_name": "tool_result",
+                "session_id": context.conversation_id().to_string(),
+                "tool_name": tool_name.as_str(),
+                "is_error": output.is_err() || output.as_ref().is_ok_and(|o| o.is_error),
+            });
+            self.run_observer_hooks(
+                &config.hooks,
+                forge_config::HookEvent::ToolResult,
+                Some(tool_name.as_str()),
+                payload,
+            )
+            .await;
+        }
+
         ToolResult::new(tool_name).call_id(call_id).output(output)
+    }
+
+    /// X19: runs the `tool_call` hooks for `input`; the first that exits 2
+    /// refuses the call with its message.
+    async fn run_tool_call_hooks(
+        &self,
+        agent: &Agent,
+        input: &ToolCallFull,
+        context: &ToolCallContext,
+    ) -> Option<String> {
+        let config = self.services.get_config().ok()?;
+        let hooks: Vec<&forge_config::UserHook> = crate::user_hooks::matching(
+            &config.hooks,
+            forge_config::HookEvent::ToolCall,
+            Some(input.name.as_str()),
+        )
+        .collect();
+        if hooks.is_empty() {
+            return None;
+        }
+        let payload = json!({
+            "hook_event_name": "tool_call",
+            "session_id": context.conversation_id().to_string(),
+            "agent_id": agent.id.as_str(),
+            "tool_name": input.name.as_str(),
+            "tool_input": input.arguments.parse().unwrap_or(Value::Null),
+            "cwd": self.services.get_environment().cwd,
+        });
+        let cwd = self.services.get_environment().cwd;
+        for hook in hooks {
+            match crate::user_hooks::run_and_queue(hook, &payload, &cwd).await {
+                Ok(outcome) => {
+                    if let Some(refusal) = outcome.refusal(input.name.as_str()) {
+                        return Some(refusal);
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(command = %hook.command, %error, "tool_call hook failed to start")
+                }
+            }
+        }
+        None
+    }
+
+    /// X19: runs observing hooks (their exit status is ignored).
+    async fn run_observer_hooks(
+        &self,
+        hooks: &[forge_config::UserHook],
+        event: forge_config::HookEvent,
+        tool: Option<&str>,
+        payload: Value,
+    ) {
+        let cwd = self.services.get_environment().cwd;
+        for hook in crate::user_hooks::matching(hooks, event, tool) {
+            if let Err(error) = crate::user_hooks::run_and_queue(hook, &payload, &cwd).await {
+                tracing::warn!(command = %hook.command, %error, "hook failed to start");
+            }
+        }
     }
 
     /// The file a read/write/patch call works on.

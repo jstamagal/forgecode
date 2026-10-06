@@ -315,6 +315,7 @@ mod tests {
                 content:
                     "# Test Plan\n\n## Task 1\n- Do something\n\n## Task 2\n- Do something else"
                         .to_string(),
+                overwrite: false,
             },
             output: crate::PlanCreateOutput {
                 path: PathBuf::from("plans/2024-08-11-test-plan-v1.md"),

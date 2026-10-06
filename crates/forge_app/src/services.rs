@@ -393,12 +393,20 @@ pub trait FsWriteService: Send + Sync {
 
 #[async_trait::async_trait]
 pub trait PlanCreateService: Send + Sync {
-    /// Create a plan file with the specified name and version.
+    /// Writes `{plans_dir}/{date}-{name}-{version}.md` (name and version
+    /// sanitised). An existing plan is replaced only with `overwrite`, and
+    /// is snapshotted first so undo brings it back (T20).
+    ///
+    /// # Errors
+    /// Returns an error when the plan exists and `overwrite` is false, or the
+    /// file cannot be written.
     async fn create_plan(
         &self,
         plan_name: String,
         version: String,
         content: String,
+        overwrite: bool,
+        context: &forge_domain::ToolCallContext,
     ) -> anyhow::Result<PlanCreateOutput>;
 }
 
@@ -940,9 +948,11 @@ impl<I: Services> PlanCreateService for I {
         plan_name: String,
         version: String,
         content: String,
+        overwrite: bool,
+        context: &forge_domain::ToolCallContext,
     ) -> anyhow::Result<PlanCreateOutput> {
         self.plan_create_service()
-            .create_plan(plan_name, version, content)
+            .create_plan(plan_name, version, content, overwrite, context)
             .await
     }
 }

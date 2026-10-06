@@ -35,6 +35,7 @@ mod tool_registry;
 pub mod tool_surface;
 mod transformers;
 mod user;
+pub mod user_hooks;
 pub mod user_prompt;
 pub mod utils;
 mod walker;

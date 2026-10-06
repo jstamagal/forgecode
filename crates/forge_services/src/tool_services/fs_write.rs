@@ -226,7 +226,7 @@ impl<
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::path::PathBuf;
 
     use forge_domain::{ConversationId, Metrics, UndoOutcome};
@@ -238,6 +238,18 @@ mod tests {
     pub(crate) struct Fixture {
         config: forge_config::ForgeConfig,
         snapshots: std::sync::Mutex<Vec<PathBuf>>,
+    }
+
+    impl Fixture {
+        /// A fixture with the given config.
+        pub(crate) fn with_config(config: forge_config::ForgeConfig) -> Self {
+            Self { config, ..Default::default() }
+        }
+
+        /// Number of snapshots taken.
+        pub(crate) fn snapshot_count(&self) -> usize {
+            self.snapshots.lock().unwrap().len()
+        }
     }
 
     impl EnvironmentInfra for Fixture {

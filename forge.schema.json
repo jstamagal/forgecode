@@ -71,6 +71,13 @@
         "null"
       ]
     },
+    "hooks": {
+      "description": "X19: user hooks run on tool calls, tool results and turn boundaries.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/UserHook"
+      }
+    },
     "http": {
       "description": "HTTP client settings including proxy, TLS, and timeout configuration.",
       "anyOf": [
@@ -81,6 +88,20 @@
           "type": "null"
         }
       ]
+    },
+    "jail": {
+      "description": "X20: the jail directory (`--jail DIR`). When set, tool-spawned\nprocesses run under `bwrap` with DIR read-write and the system\nread-only, and file tools refuse paths outside DIR and `jail_bind`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "jail_bind": {
+      "description": "X20: extra paths visible in the jail: `path` (read-only), `path:ro` or\n`path:rw`; `~` expands to the home directory.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
     },
     "lock_subagent_model": {
       "description": "When true, the `task` tool refuses a `model` override; workers always\nrun on their agent's configured model.",
@@ -215,6 +236,13 @@
       "default": 0,
       "minimum": 0
     },
+    "plans_dir": {
+      "description": "Directory the `plan` tool writes to; relative paths resolve against\nthe working directory. Unset means `{cwd}/plans`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "providers": {
       "description": "Additional provider definitions merged with the built-in provider list.\n\nEntries with an `id` matching a built-in provider override its fields;\nentries with a new `id` are appended and become available for model\nselection.",
       "type": "array",
@@ -326,6 +354,16 @@
       "type": "array",
       "items": {
         "$ref": "#/$defs/ToolAliasProfile"
+      }
+    },
+    "tool_bans": {
+      "description": "X18: argument ban patterns, tool name → bans. A call whose argument\nmatches a ban's regex is refused before it runs. Always on, also\nwithout `--restricted`.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/ToolBan"
+        }
       }
     },
     "tool_supported": {
@@ -537,6 +575,61 @@
           "description": "Maximum reasoning effort; only available on select Anthropic models.",
           "type": "string",
           "const": "max"
+        }
+      ]
+    },
+    "HookEvent": {
+      "description": "Events a user hook can run on (X19). js's events that have a forgecode\ncounterpart; the input/stream/MCP-notification events have none.",
+      "oneOf": [
+        {
+          "description": "Before a tool call runs; exit status 2 refuses the call.",
+          "type": "string",
+          "const": "tool_call"
+        },
+        {
+          "description": "After a tool call returned.",
+          "type": "string",
+          "const": "tool_result"
+        },
+        {
+          "description": "When a turn starts (a user message).",
+          "type": "string",
+          "const": "turn_start"
+        },
+        {
+          "description": "When a turn ends.",
+          "type": "string",
+          "const": "turn_end"
+        },
+        {
+          "description": "After each model response.",
+          "type": "string",
+          "const": "response"
+        },
+        {
+          "description": "A tool call failed.",
+          "type": "string",
+          "const": "error"
+        },
+        {
+          "description": "Before the conversation is compacted.",
+          "type": "string",
+          "const": "pre_compact"
+        },
+        {
+          "description": "After the conversation was compacted.",
+          "type": "string",
+          "const": "post_compact"
+        },
+        {
+          "description": "When forge starts a session (interactive or `-p`).",
+          "type": "string",
+          "const": "session_start"
+        },
+        {
+          "description": "When forge exits.",
+          "type": "string",
+          "const": "session_end"
         }
       ]
     },
@@ -1070,6 +1163,33 @@
         "aliases"
       ]
     },
+    "ToolBan": {
+      "description": "X18: one argument ban (`[[tool_bans.shell]] arg = \"command\" pattern =\n\"rm -rf\"`).",
+      "type": "object",
+      "properties": {
+        "arg": {
+          "description": "Argument name to test; absent or `*` tests every string argument.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pattern": {
+          "description": "Regex searched in the argument's value.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "What the model reads when the ban applies.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "pattern"
+      ]
+    },
     "Update": {
       "description": "Configuration for automatic forge updates",
       "type": "object",
@@ -1102,6 +1222,39 @@
         "weekly",
         "never",
         "always"
+      ]
+    },
+    "UserHook": {
+      "description": "A user hook (X19): `command` runs under `sh -c` with the event as one JSON\nobject on stdin (Claude Code's protocol). Under `tool_call`, exit status 2\nrefuses the call and the first line of stderr (else stdout) is what the\nmodel reads.",
+      "type": "object",
+      "properties": {
+        "command": {
+          "description": "Shell command to run.",
+          "type": "string"
+        },
+        "event": {
+          "$ref": "#/$defs/HookEvent"
+        },
+        "timeout_secs": {
+          "description": "Seconds before the hook's process group is killed (default 30).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "tools": {
+          "description": "Only for these tools (exact names); empty means every tool.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "event",
+        "command"
       ]
     },
     "double": {

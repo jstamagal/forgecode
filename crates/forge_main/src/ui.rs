@@ -834,6 +834,12 @@ impl<A: API + ConsoleWriter + 'static, F: Fn(ForgeConfig) -> A + Send + Sync> UI
                 crate::logs::run(args, log_dir).await?;
                 return Ok(());
             }
+            TopLevelCommand::Tools(args) => {
+                let base = self.api.environment().base_path;
+                let report = crate::managed_tools::run(args.install, &base).await?;
+                self.writeln(report)?;
+                return Ok(());
+            }
             TopLevelCommand::Select(cmd) => {
                 if !matches!(&cmd.command, SelectCommand::File { .. }) {
                     self.init_state(false).await?;

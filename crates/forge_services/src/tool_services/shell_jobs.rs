@@ -380,6 +380,8 @@ pub struct RunSpec {
     pub keep_ansi: bool,
     pub cap: usize,
     pub spill_dir: PathBuf,
+    /// X20: run the command under bwrap in this jail.
+    pub jail: Option<forge_domain::Jail>,
 }
 
 /// All jobs of the process.
@@ -400,13 +402,23 @@ impl ShellJobs {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let mut command = tokio::process::Command::new(&spec.shell);
+        let mut shell_argv = vec![spec.shell.clone()];
         if matches!(shell_name.as_str(), "bash" | "zsh") {
-            command.args(["-o", "pipefail"]);
+            shell_argv.extend(["-o".to_string(), "pipefail".to_string()]);
         }
+        shell_argv.extend(["-c".to_string(), spec.command.clone()]);
+        let argv = match &spec.jail {
+            Some(jail) => {
+                let path_env = spec.env.get("PATH").cloned().unwrap_or_default();
+                let mut wrapped = vec![jail.bwrap.display().to_string()];
+                wrapped.extend(jail.argv(&shell_argv, &spec.cwd, &path_env));
+                wrapped
+            }
+            None => shell_argv,
+        };
+        let mut command = tokio::process::Command::new(&argv[0]);
         command
-            .arg("-c")
-            .arg(&spec.command)
+            .args(&argv[1..])
             .current_dir(&spec.cwd)
             .env_clear()
             .envs(&spec.env)
@@ -605,11 +617,58 @@ mod tests {
             keep_ansi: false,
             cap,
             spill_dir: dir.join("spill"),
+            jail: None,
         }
     }
 
     fn text(excerpt: &Excerpt) -> String {
         bstr::ByteSlice::to_str_lossy(excerpt.head.as_slice()).into_owned()
+    }
+
+    #[tokio::test]
+    async fn test_jailed_command_runs_through_bwrap() {
+        // A stand-in bwrap records its arguments and runs what follows `--`;
+        // real bwrap cannot nest inside a sandboxed test runner.
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("argv");
+        let bwrap = dir.path().join("bwrap");
+        std::fs::write(
+            &bwrap,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bwrap, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let jail = forge_domain::Jail {
+            root: dir.path().to_path_buf(),
+            bwrap,
+            private: dir.path().join("private"),
+            binds: vec![],
+            home: dir.path().join("home"),
+            readable: vec![],
+        };
+        let jobs = ShellJobs::default();
+        let mut fixture = spec("echo inside", dir.path(), 1000);
+        fixture.jail = Some(jail);
+
+        let job = jobs.start(fixture).unwrap();
+        let exit = job.wait(Duration::from_secs(10)).await;
+        let [out, _] = job.output(1000, false);
+        let argv = std::fs::read_to_string(&log).unwrap();
+
+        assert_eq!(
+            (exit, text(&out)),
+            (Some(Exit { code: Some(0) }), "inside\n".to_string())
+        );
+        assert!(argv.starts_with("--die-with-parent\n"), "{argv}");
+        assert!(argv.contains("--ro-bind\n/\n/\n"), "{argv}");
+        assert!(argv.ends_with("-c\necho inside\n"), "{argv}");
     }
 
     #[tokio::test]

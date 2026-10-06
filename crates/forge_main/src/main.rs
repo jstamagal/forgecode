@@ -104,30 +104,84 @@ async fn run() -> Result<()> {
 
     // Read and validate configuration at startup so any errors are surfaced
     // immediately rather than silently falling back to defaults at runtime.
-    let config =
+    let mut config =
         ForgeConfig::read().context("Failed to read Forge configuration from .forge.toml")?;
+    // X18: `--restricted` turns the permission policy on.
+    if cli.restricted {
+        config.restricted = true;
+    }
+    for (tool, bans) in &config.tool_bans {
+        for ban in bans {
+            if let Some(error) = forge_domain::invalid_ban(&ban.pattern) {
+                anyhow::bail!(
+                    "tool_bans.{tool}: invalid pattern {:?}: {error}",
+                    ban.pattern
+                );
+            }
+        }
+    }
 
     // Handle worktree creation if specified
-    let cwd: PathBuf = match (&cli.sandbox, &cli.directory) {
-        (Some(sandbox), Some(cli)) => {
-            let mut sandbox = Sandbox::new(sandbox).create()?;
-            sandbox.push(cli);
-            sandbox
+    let cwd: PathBuf = match (&cli.worktree, &cli.directory, &cli.jail) {
+        (_, _, Some(jail)) => jail
+            .canonicalize()
+            .with_context(|| format!("--jail {}: no such directory", jail.display()))?,
+        (Some(worktree), Some(cli), _) => {
+            let mut worktree = Sandbox::new(worktree).create()?;
+            worktree.push(cli);
+            worktree
         }
-        (Some(sandbox), _) => Sandbox::new(sandbox).create()?,
-        (_, Some(cli)) => match cli.canonicalize() {
+        (Some(worktree), _, _) => Sandbox::new(worktree).create()?,
+        (_, Some(cli), _) => match cli.canonicalize() {
             Ok(cwd) => cwd,
             Err(_) => panic!("Invalid path: {}", cli.display()),
         },
-        (_, _) => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        (_, _, _) => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     };
+
+    // X20: enter the jail before anything spawns a tool process. A missing
+    // bwrap is an error here, not at the first tool call.
+    let jail_root = cli
+        .jail
+        .as_ref()
+        .map(|_| cwd.clone())
+        .or(config.jail.clone());
+    if let Some(root) = jail_root {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        let state_dir = forge_config::ConfigReader::base_path();
+        let path_env = std::env::var("PATH").unwrap_or_default();
+        let jail = forge_domain::Jail::new(&root, &config.jail_bind, &home, &state_dir, &path_env)?;
+        forge_domain::enter_jail(jail)?;
+    }
+
+    // X19: session_start / session_end hooks bracket the whole session.
+    let hooks = config.hooks.clone();
+    let session_cwd = cwd.clone();
+    run_session_hooks(&hooks, forge_config::HookEvent::SessionStart, &session_cwd).await;
 
     let mut ui = UI::init(cli, config, move |config| {
         ForgeAPI::init(cwd.clone(), config)
     })?;
     ui.run().await;
 
+    run_session_hooks(&hooks, forge_config::HookEvent::SessionEnd, &session_cwd).await;
     Ok(())
+}
+
+/// Runs the session hooks of `event` (observers; exit status ignored).
+async fn run_session_hooks(
+    hooks: &[forge_config::UserHook],
+    event: forge_config::HookEvent,
+    cwd: &std::path::Path,
+) {
+    let payload = serde_json::json!({"hook_event_name": event.name(), "cwd": cwd});
+    for hook in forge_app::user_hooks::matching(hooks, event, None) {
+        if let Err(error) = forge_app::user_hooks::run_and_queue(hook, &payload, cwd).await {
+            tracing::warn!(command = %hook.command, %error, "hook failed to start");
+        }
+    }
 }
 
 #[cfg(test)]

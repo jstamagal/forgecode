@@ -226,6 +226,11 @@ impl ForgeFetch {
         let path = url
             .to_file_path()
             .map_err(|_| anyhow!("invalid file:// URL {url}"))?;
+        // X20: a file:// read follows the jail's path rules.
+        if let Some(jail) = forge_domain::active_jail() {
+            jail.confine(&path, false)
+                .map_err(|e| anyhow::Error::new(forge_domain::ToolRefusal(e.to_string())))?;
+        }
         let meta = std::fs::metadata(&path)
             .with_context(|| format!("no such file: {}", path.display()))?;
         if !meta.is_file() {
