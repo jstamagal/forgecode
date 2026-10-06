@@ -434,3 +434,150 @@ List the prompts of an MCP server. Before using it, run tool_discovery with kind
 ### mcp_prompt_get
 
 Get an MCP prompt and its messages. Before using it, run tool_discovery with kind="mcp" (or an MCP server name as source) to connect the servers, then pass the exact server name of an mcp status row. Copy an exact prompt name from mcp_prompt_list. Configured secrets are redacted from the result.
+
+---
+
+### terminal_session
+
+Drive an interactive program through a persistent terminal (PTY): TUIs, REPLs, pagers, editors, installers and prompts. Sessions persist across calls for this conversation; a running process is normal, and stop sessions when you are done. `shell` is for ordinary non-interactive commands.
+- `action`: `start` (needs `command`; `cols`/`rows` only here, default 120x40), `send` (`keys`), `look`, `stop`, `list`.
+- `keys` is comma-separated: named keys are `enter`, `tab`, `esc`, the arrows (`up`, `down`, `left`, `right`), `home`, `end`, `pgup`, `pgdn`, `backspace`, `delete`, `ctrl-c`, `ctrl-d`, `ctrl-l`, `ctrl-x`, `ctrl-z` and `f1` to `f12`; anything else is typed verbatim, and `comma` types a comma.
+- Each result has the rendered screen lines, cursor position and process state (`still_running`, `exit_status`). `lines_changed` and `screen_responded` compare against the previous observation: after `send`, change during the wait window after the keys (not proof the keys caused it); after `look`, passive change since last time.
+- `terminal_snapshot` renders the screen as a PNG when text cannot show spacing, colour, borders or clipping, and also resets that comparison baseline.
+- Under a jail (`-C DIR`) the command runs in the same jail as the shell tool.
+
+---
+
+### terminal_snapshot
+
+Render the current screen of a terminal session as a PNG, for judging layout, borders, colours, cursor placement, wrapping or clipping that text cannot show. The session must already be started. The result is the image when the model accepts images, and always names the file it was written to.
+
+---
+
+### lsp
+
+Ask a language server about a source file: `diagnostics` (errors and warnings in the file), `definition`, `references` or `hover` (type and docs) at a position. The server is picked by extension from what is on PATH: rust-analyzer for Rust, basedpyright or pyright for Python, gopls for Go, typescript-language-server for TypeScript and JavaScript, clangd for C and C++. A file no installed server covers returns an error naming what was looked for.
+- Each call sends the file as it is on disk now, so call `diagnostics` after an edit to check it. The first call for a project starts the server and can take a while; later calls reuse it. A server still indexing may return nothing; call again.
+- A position is `line` and `character`, both 1-based.
+- Locations come back as `path:line:column: source line`, relative to the working directory when under it.
+
+---
+
+### kernel
+
+Execute Python in a persistent IPython kernel (Jupyter). State survives between calls: functions, imports, open connections and loaded data defined in one call are there in the next.
+- `action`: `run` (default) submits `code`; `poll` returns what a running cell produced since the last read; `wait` blocks for it up to `timeout`; `interrupt` stops the cell (the namespace survives); `restart` replaces the kernel (destroys every definition); `kill` shuts it down.
+- `timeout` (default 120 seconds) is the longest one call blocks. A cell that finishes inside it comes back whole; one still running comes back as a handle, `HANDLE <n> RUNNING`, and a new `code` is refused while it runs.
+- stdout, stderr, results and tracebacks come back; images are written to files and reported as `IMAGE <path>`. A finished cell ends with a `NAMESPACE` line listing the functions and classes defined so far.
+- Cells can call tools: the namespace holds `tools`, and `tools.<name>(...)` runs the tool `<name>` with keyword arguments and returns its result text. Each call goes through the same checks as a direct call (allowed tools, argument validation, bans, read-before-edit); a refusal raises `tools.ToolError`. `tools.names()` lists the callable tools; `kernel` and `toolbox` are not callable from a cell.
+- `toolbox` saves functions defined here to disk and loads them into later sessions.
+- Use `shell` for builds, tests, git and anything that is a command rather than Python.
+
+
+---
+
+### toolbox
+
+Functions that outlive the session: save a function to disk, load saved functions into the kernel, keep every revision with its provenance.
+- `action`: `list` (default; every saved function with its latest revision and scope), `show` (source of the latest or a given `revision`), `save` (`name` plus `source`: one top-level `def name(...)`; `note` says what changed), `load` (execs every saved function, or just `name`, into the kernel), `history` (every revision of `name` with date, session and note), `delete` (removes `name`; its revisions stay in the history file).
+- `scope`: `global` (default, every project) or `project` (`.forge/toolbox/` in the working directory; shadows a global function of the same name).
+- `save` never overwrites: each save is a new revision (`r1`, `r2`, …). It refuses a function that reads a free name the source does not define or import (a session variable, an unsaved helper); the error names every one. Imports used by the function go inside its body or above it in `source`.
+- Until `load` has run, the `kernel` namespace has none of the saved functions.
+
+
+---
+
+### browse
+
+Read a web page the way a browser sees it, JavaScript included, through obscura (a self-contained browser engine). Pages that build themselves in JavaScript come back rendered; rendered dumps use a five-second settle window.
+- `dump` (default `markdown`): `markdown` (links made absolute against the page URL), `text`, `html` (the DOM after scripts ran), `links` (URL, tab, anchor text per line), `original` (the raw response body as text), `assets` (one JSON object per sub-resource), `cookies` (the cookie jar as JSON).
+- `screenshot`: a path to save a PNG of the settled page; the result is then only the `SCREENSHOT path=… size=…` line, so call again without it to read the page.
+- A status of 400 or above leads the result with `ERROR: HTTP <code> from <url>` followed by the page.
+- Private, loopback and link-local IP literals are allowed. No POST, headers or body.
+- Use `fetch` for API calls that need a method, headers or a body.
+- obscura comes from forge's managed binaries (`forge tools --install`) or, failing that, PATH.
+
+---
+
+### browser_probe
+
+Render and screenshot a page or local HTML file in real headless Chromium (Playwright; WebGL through SwiftShader, no GPU needed) and measure whether an interaction changes it.
+- `click` is a `>`-separated chain of case-insensitive regexes matched against visible button or link text (e.g. `menu>settings`); `press` is a comma-separated list of keys pressed after the clicks.
+- The result lists the PNG frames (after load, after the actions, and `hold_ms` later) with per-frame metrics: size, dominant-colour share, unique colours, changed pixels against the previous frame, WebGL availability, console and page errors. Metrics describe the frames; they do not judge them.
+- Needs `python3` with the `playwright` package and its Chromium; a missing one is reported as an error.
+- `read` a returned PNG to look at the frame.
+
+
+---
+
+### serper_search
+
+Google search via Serper (needs `SERPER_API_KEY`). Keyword queries: exact phrases, names, error messages, recent news. Returns Google's organic results as title, URL and snippet, with the answer box first when there is one.
+`tavily_search` returns extracted page text and a synthesized answer instead of snippets.
+`exa_search` finds things you can describe but not name.
+`docs_search` is for library documentation.
+
+
+---
+
+### tavily_search
+
+Web search via Tavily (needs `TAVILY_API_KEY`). Each result carries extracted page text, usually with a one-paragraph synthesized answer first, so research and "how do I" questions get read without fetching each page.
+`serper_search` is for exact phrases and the freshest news.
+`exa_search` finds things you can describe but not name.
+`docs_search` is for library documentation.
+
+
+---
+
+### exa_search
+
+Semantic web search via Exa (needs `EXA_API_KEY`): describe what you want in a full sentence and it finds pages by meaning, each with a slice of page text. Best when you know what you mean but not what it is called.
+`serper_search` is for exact strings, names and error messages.
+`tavily_search` is for research questions that want a synthesized answer.
+`docs_search` is for library documentation.
+
+
+---
+
+### docs_search
+
+Version-current library documentation via Context7 (`CONTEXT7_API_KEY` optional). Use it before writing code against a third-party library, framework, SDK or API. It resolves `library` to Context7's best match and returns documentation snippets with source URLs. Context7 matches keywords, so a hit is reported only when the requested name (case and separators ignored) is the hit's project name (an id path segment or its title) or one whole word of it; anything else comes back as no match rather than an unrelated project's docs. Set `topic`; an untargeted dump is long.
+`serper_search` is for issues, changelogs and discussion around a library.
+
+
+---
+
+### notebook_edit
+
+Change one cell of a Jupyter notebook (.ipynb): `replace` its source (the default), `insert` a new cell after it, or `delete` it. Read the notebook first; `read` shows each cell's id as `[cell N id=ID type]`. A notebook changed on disk since the read is refused; read it again.
+- `cell_id` is the cell's id, or `index:N` (0-based) for notebooks without ids. `insert` with no `cell_id` inserts at the top and needs `cell_type` (`code` or `markdown`).
+- `new_source` is the cell's whole new source. A replaced code cell loses its outputs and execution count.
+- The notebook keeps its JSON layout (one-space indent, trailing newline).
+- The notebook is snapshotted first, so `undo` restores it.
+
+
+---
+
+### wiki_convert
+
+Convert one file for a wiki vault: text, code and structured text are returned as text; PDFs through `pdftotext`; office and ebook formats through `pandoc` (or `soffice`); images come back as an embed plus any text `tesseract` reads from them (a missing tesseract is reported as OCR unavailable). Images and audio/video are copied into `<vault>/assets/` when `vault` is given (it must exist). The model decides what pages to write; this only converts input and copies media.
+
+---
+
+### wiki_write
+
+Create or replace a structured wiki page with front matter.
+- `kind` selects the page family: `source`, `entity`, `concept` or `synthesis`; the page goes to `<vault>/<kind>s/<slug>.md`.
+- `vault` must name an existing vault directory; a blank or `.` vault is refused.
+- An existing page is protected unless `overwrite=true`; pass a fully merged body when replacing.
+- Tags, type and update date are normalized by the tool. Use wikilinks in `body` where knowledge should connect.
+
+---
+
+### wiki_finish_ingest
+
+Archive an ingested unit, append the log entry and commit the vault when possible.
+- `source` is the ingested file under `<vault>/raw/`; it moves to `<vault>/raw/archive/`. Archive runs first; if it fails, no log entry or commit is created.
+- The log entry (date, source, `note`) is appended to `<vault>/log.md`.
+- The commit runs only when the vault is the root of its own git work tree and there is a diff; a vault nested inside another repository is not committed. A failed commit is an error, with the archive and log left in place to retry.

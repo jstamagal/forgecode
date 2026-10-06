@@ -728,3 +728,478 @@ expression: tools
     "name"
   ]
 }
+{
+  "description": "T15: drive a persistent terminal.",
+  "type": "object",
+  "properties": {
+    "action": {
+      "description": "start, send, look, stop or list.",
+      "type": "string"
+    },
+    "cols": {
+      "description": "Columns (start only; default 120).",
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 400,
+      "minimum": 1,
+      "nullable": true
+    },
+    "command": {
+      "description": "Command to run (start).",
+      "type": "string",
+      "nullable": true
+    },
+    "cwd": {
+      "description": "Working directory (start; default the current directory).",
+      "type": "string",
+      "nullable": true
+    },
+    "keys": {
+      "description": "Comma-separated keys to send (send).",
+      "type": "string",
+      "nullable": true
+    },
+    "rows": {
+      "description": "Rows (start only; default 40).",
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 200,
+      "minimum": 1,
+      "nullable": true
+    },
+    "session": {
+      "description": "Session name (default \"main\").",
+      "type": "string",
+      "nullable": true
+    },
+    "wait_ms": {
+      "description": "Milliseconds to wait for output before reading the screen (default\n700, at most 10000).",
+      "type": "integer",
+      "format": "uint64",
+      "maximum": 10000,
+      "minimum": 0,
+      "nullable": true
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "action"
+  ]
+}
+{
+  "description": "T15: render a terminal session's screen as a PNG.",
+  "type": "object",
+  "properties": {
+    "session": {
+      "description": "Session name (default \"main\").",
+      "type": "string",
+      "nullable": true
+    },
+    "wait_ms": {
+      "description": "Milliseconds to wait for output first (default 100).",
+      "type": "integer",
+      "format": "uint64",
+      "maximum": 10000,
+      "minimum": 0,
+      "nullable": true
+    }
+  },
+  "additionalProperties": false
+}
+{
+  "description": "T18: language-server queries.",
+  "type": "object",
+  "properties": {
+    "character": {
+      "description": "1-based column (definition, references, hover).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 1,
+      "nullable": true
+    },
+    "file_path": {
+      "description": "File to query.",
+      "type": "string"
+    },
+    "line": {
+      "description": "1-based line (definition, references, hover).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 1,
+      "nullable": true
+    },
+    "operation": {
+      "description": "diagnostics, definition, references or hover.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "operation",
+    "file_path"
+  ]
+}
+{
+  "description": "T16: persistent Python kernel.",
+  "type": "object",
+  "properties": {
+    "action": {
+      "description": "run (default), poll, wait, interrupt, restart or kill.",
+      "type": "string",
+      "nullable": true
+    },
+    "code": {
+      "description": "Python code to run (run).",
+      "type": "string",
+      "nullable": true
+    },
+    "handle": {
+      "description": "Handle of a run that is still going (poll, wait).",
+      "type": "string",
+      "nullable": true
+    },
+    "timeout": {
+      "description": "Seconds a run (or wait) blocks before returning a handle (default 120).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 1,
+      "nullable": true
+    }
+  },
+  "additionalProperties": false
+}
+{
+  "description": "T17: the kernel's persistent function library.",
+  "type": "object",
+  "properties": {
+    "action": {
+      "description": "list (default), show, save, load, history or delete.",
+      "type": "string",
+      "nullable": true
+    },
+    "name": {
+      "description": "Function name (show, save, load, history, delete).",
+      "type": "string",
+      "nullable": true
+    },
+    "note": {
+      "description": "What the revision changed (save).",
+      "type": "string",
+      "nullable": true
+    },
+    "revision": {
+      "description": "Revision to show or load (default the latest).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 1,
+      "nullable": true
+    },
+    "scope": {
+      "description": "global (default) or project.",
+      "type": "string",
+      "nullable": true
+    },
+    "source": {
+      "description": "Function source (save): one top-level `def`.",
+      "type": "string",
+      "nullable": true
+    }
+  },
+  "additionalProperties": false
+}
+{
+  "description": "T13: render a page in a real browser engine (obscura).",
+  "type": "object",
+  "properties": {
+    "dump": {
+      "description": "markdown (default), text, html, links, original, assets or cookies.",
+      "type": "string",
+      "nullable": true
+    },
+    "screenshot": {
+      "description": "Write a PNG screenshot to this path instead of returning the page.",
+      "type": "string",
+      "nullable": true
+    },
+    "url": {
+      "description": "http(s):// or file:// URL.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "url"
+  ]
+}
+{
+  "description": "T14: drive a page in headless Chromium and capture frames.",
+  "type": "object",
+  "properties": {
+    "click": {
+      "description": "CSS selector to click after load.",
+      "type": "string",
+      "nullable": true
+    },
+    "hold_ms": {
+      "description": "Milliseconds between the two frames after the action (default 1600).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0,
+      "nullable": true
+    },
+    "output_dir": {
+      "description": "Directory for the frames (default a fresh directory under\ntool-results).",
+      "type": "string",
+      "nullable": true
+    },
+    "press": {
+      "description": "Comma-separated keys to press after load (Playwright key names).",
+      "type": "string",
+      "nullable": true
+    },
+    "settle_ms": {
+      "description": "Milliseconds to wait after load (default 1200).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0,
+      "nullable": true
+    },
+    "target": {
+      "description": "URL or local HTML file to open.",
+      "type": "string"
+    },
+    "viewport_height": {
+      "description": "Viewport height (default 800).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0,
+      "nullable": true
+    },
+    "viewport_width": {
+      "description": "Viewport width (default 1280).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0,
+      "nullable": true
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "target"
+  ]
+}
+{
+  "description": "T11: web search through Serper (Google results).",
+  "type": "object",
+  "properties": {
+    "num": {
+      "description": "Results (default 8).",
+      "type": "integer",
+      "format": "uint32",
+      "maximum": 100,
+      "minimum": 1,
+      "nullable": true
+    },
+    "query": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "query"
+  ]
+}
+{
+  "description": "T11: web search through Tavily.",
+  "type": "object",
+  "properties": {
+    "max_results": {
+      "description": "Results (default 8).",
+      "type": "integer",
+      "format": "uint32",
+      "maximum": 20,
+      "minimum": 1,
+      "nullable": true
+    },
+    "query": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "query"
+  ]
+}
+{
+  "description": "T11: semantic web search through Exa.",
+  "type": "object",
+  "properties": {
+    "num": {
+      "description": "Results (default 8).",
+      "type": "integer",
+      "format": "uint32",
+      "maximum": 100,
+      "minimum": 1,
+      "nullable": true
+    },
+    "query": {
+      "description": "Describe what you want in a full sentence.",
+      "type": "string"
+    },
+    "text_chars": {
+      "description": "Characters of page text per result (default 1500).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 100,
+      "nullable": true
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "query"
+  ]
+}
+{
+  "description": "T12: library documentation through Context7.",
+  "type": "object",
+  "properties": {
+    "library": {
+      "description": "Library name, e.g. \"tokio\" or \"react\".",
+      "type": "string"
+    },
+    "tokens": {
+      "description": "Tokens of documentation to return (default 4000).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 500,
+      "nullable": true
+    },
+    "topic": {
+      "description": "What to look up in the docs.",
+      "type": "string",
+      "nullable": true
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "library"
+  ]
+}
+{
+  "description": "T19: edit one cell of a Jupyter notebook.",
+  "type": "object",
+  "properties": {
+    "cell_id": {
+      "description": "The cell to edit or insert after: its id, or `index:N` (0-based).\nOmit with `insert` to insert at the top.",
+      "type": "string",
+      "nullable": true
+    },
+    "cell_type": {
+      "description": "code or markdown (insert; replace keeps the type when omitted).",
+      "type": "string",
+      "nullable": true
+    },
+    "edit_mode": {
+      "description": "replace (default), insert or delete.",
+      "type": "string",
+      "nullable": true
+    },
+    "file_path": {
+      "description": "The `.ipynb` file.",
+      "type": "string"
+    },
+    "new_source": {
+      "description": "New cell source (replace, insert).",
+      "type": "string",
+      "nullable": true
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "file_path"
+  ]
+}
+{
+  "description": "T25: convert one file for a wiki vault.",
+  "type": "object",
+  "properties": {
+    "file_path": {
+      "description": "File to convert.",
+      "type": "string"
+    },
+    "vault": {
+      "description": "Vault directory media is copied into (`<vault>/assets/`).",
+      "type": "string",
+      "nullable": true
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "file_path"
+  ]
+}
+{
+  "description": "T25: create or replace a wiki page.",
+  "type": "object",
+  "properties": {
+    "body": {
+      "description": "Page body (markdown, wikilinks welcome).",
+      "type": "string"
+    },
+    "kind": {
+      "description": "source, entity, concept or synthesis.",
+      "type": "string"
+    },
+    "overwrite": {
+      "description": "Replace an existing page.",
+      "type": "boolean"
+    },
+    "tags": {
+      "description": "Tags.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "nullable": true
+    },
+    "title": {
+      "description": "Page title.",
+      "type": "string"
+    },
+    "vault": {
+      "description": "Existing vault directory.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "vault",
+    "kind",
+    "title",
+    "body"
+  ]
+}
+{
+  "description": "T25: archive an ingested unit, log it and commit the vault.",
+  "type": "object",
+  "properties": {
+    "note": {
+      "description": "What was added, or why the unit was skipped.",
+      "type": "string"
+    },
+    "source": {
+      "description": "The ingested file under `<vault>/raw/` to archive.",
+      "type": "string"
+    },
+    "vault": {
+      "description": "Existing vault directory.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "vault",
+    "source",
+    "note"
+  ]
+}

@@ -5,7 +5,7 @@ use forge_domain::{ToolCallContext, ToolCatalog, ToolOutput};
 
 use crate::fmt::content::FormatContent;
 use crate::operation::ToolOperation;
-use crate::services::{ReadRequest, Services, ShellService};
+use crate::services::{CapabilityService, ReadRequest, Services, ShellService};
 use crate::{
     AgentRegistry, ConversationService, EnvironmentInfra, FsPatchService, FsReadService,
     FsRemoveService, FsSearchService, FsUndoService, FsWriteService, ImageReadService, McpService,
@@ -225,10 +225,71 @@ impl<
                 let todos = context.get_todos()?;
                 ToolOperation::TodoRead { output: todos }
             }
-            ToolCatalog::Task(_) | ToolCatalog::ToolDiscovery(_) => {
-                // Handled in ToolRegistry: they act on agents and on the
-                // request's tool surface.
-                unreachable!("task and tool_discovery are handled in ToolRegistry")
+            ToolCatalog::Task(_) | ToolCatalog::ToolDiscovery(_) | ToolCatalog::Kernel(_) => {
+                // Handled in ToolRegistry: they act on agents, on the
+                // request's tool surface, or call back into the registry.
+                unreachable!("task, tool_discovery and kernel are handled in ToolRegistry")
+            }
+            // Phase 7 capability tools: paths are made absolute and confined
+            // (X20) here, the work happens in the capability service.
+            mut input @ (ToolCatalog::TerminalSession(_)
+            | ToolCatalog::TerminalSnapshot(_)
+            | ToolCatalog::Lsp(_)
+            | ToolCatalog::Toolbox(_)
+            | ToolCatalog::Browse(_)
+            | ToolCatalog::BrowserProbe(_)
+            | ToolCatalog::SerperSearch(_)
+            | ToolCatalog::TavilySearch(_)
+            | ToolCatalog::ExaSearch(_)
+            | ToolCatalog::DocsSearch(_)
+            | ToolCatalog::NotebookEdit(_)
+            | ToolCatalog::WikiConvert(_)
+            | ToolCatalog::WikiWrite(_)
+            | ToolCatalog::WikiFinishIngest(_)) => {
+                match &mut input {
+                    ToolCatalog::TerminalSession(i) => {
+                        if let Some(cwd) = i.cwd.take() {
+                            i.cwd = Some(self.confined(cwd, false)?);
+                        }
+                    }
+                    ToolCatalog::Lsp(i) => {
+                        i.file_path = self.confined(i.file_path.clone(), false)?
+                    }
+                    ToolCatalog::Browse(i) => {
+                        if let Some(shot) = i.screenshot.take() {
+                            i.screenshot = Some(self.confined(shot, true)?);
+                        }
+                        if let Some(path) = i.url.strip_prefix("file://") {
+                            self.confined(path.to_string(), false)?;
+                        }
+                    }
+                    ToolCatalog::BrowserProbe(i) => {
+                        if let Some(dir) = i.output_dir.take() {
+                            i.output_dir = Some(self.confined(dir, true)?);
+                        }
+                        if !i.target.contains("://") {
+                            i.target = self.confined(i.target.clone(), false)?;
+                        }
+                    }
+                    ToolCatalog::NotebookEdit(i) => {
+                        i.file_path = self.confined(i.file_path.clone(), true)?
+                    }
+                    ToolCatalog::WikiConvert(i) => {
+                        i.file_path = self.confined(i.file_path.clone(), false)?;
+                        if let Some(vault) = i.vault.take() {
+                            i.vault = Some(self.confined(vault, true)?);
+                        }
+                    }
+                    ToolCatalog::WikiWrite(i) => i.vault = self.confined(i.vault.clone(), true)?,
+                    ToolCatalog::WikiFinishIngest(i) => {
+                        i.vault = self.confined(i.vault.clone(), true)?;
+                        i.source = self.confined(i.source.clone(), true)?;
+                    }
+                    _ => {}
+                }
+                let cwd = self.services.get_environment().cwd;
+                let output = self.services.run_capability(input, cwd, context).await?;
+                ToolOperation::Output { output }
             }
             // M3: resource and prompt controls on a connected MCP server.
             ToolCatalog::McpResourceList(input) => {

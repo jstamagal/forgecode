@@ -1,4 +1,6 @@
 mod ast_engine;
+mod capabilities;
+mod capability_service;
 mod fetch;
 mod fs_patch;
 mod fs_read;
@@ -7,6 +9,8 @@ mod fs_search;
 mod fs_undo;
 mod fs_write;
 mod image_read;
+mod kernel;
+mod lsp;
 mod notebook;
 mod patch_engine;
 mod plan_create;
@@ -16,7 +20,10 @@ mod shell;
 mod shell_jobs;
 mod skill;
 mod syn;
+mod terminal;
+mod toolbox;
 
+pub use capability_service::*;
 pub use fetch::*;
 pub use fs_patch::*;
 pub use fs_read::*;

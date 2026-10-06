@@ -5,8 +5,8 @@ use derive_more::From;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Context, ContextMessage, Role, TextMessage, Todo, ToolCallFull, ToolCallId, ToolCatalog,
-    ToolResult,
+    Context, ContextMessage, ExaSearch, Role, SerperSearch, TavilySearch, TextMessage, Todo,
+    ToolCallFull, ToolCallId, ToolCatalog, ToolResult,
 };
 
 /// A simplified summary of a context, focusing on messages and their tool calls
@@ -391,6 +391,28 @@ fn extract_tool_info(call: &ToolCallFull, current_todos: &[Todo]) -> Option<Summ
             | ToolCatalog::McpPromptGet(_) => {
                 Some(SummaryTool::Mcp { name: call.name.to_string() })
             }
+            // Phase 7 tools summarise as the fact the next turn needs.
+            ToolCatalog::TerminalSession(input) => {
+                input.command.map(|command| SummaryTool::Shell { command })
+            }
+            ToolCatalog::Kernel(input) => input.code.map(|command| SummaryTool::Shell { command }),
+            ToolCatalog::NotebookEdit(input) => {
+                Some(SummaryTool::FileUpdate { path: input.file_path })
+            }
+            ToolCatalog::WikiWrite(input) => Some(SummaryTool::FileUpdate { path: input.title }),
+            ToolCatalog::Browse(input) => Some(SummaryTool::Fetch { url: input.url }),
+            ToolCatalog::SerperSearch(SerperSearch { query, .. })
+            | ToolCatalog::TavilySearch(TavilySearch { query, .. })
+            | ToolCatalog::ExaSearch(ExaSearch { query, .. }) => {
+                Some(SummaryTool::Search { pattern: query })
+            }
+            ToolCatalog::DocsSearch(input) => Some(SummaryTool::Search { pattern: input.library }),
+            ToolCatalog::Lsp(_)
+            | ToolCatalog::WikiConvert(_)
+            | ToolCatalog::TerminalSnapshot(_)
+            | ToolCatalog::Toolbox(_)
+            | ToolCatalog::BrowserProbe(_)
+            | ToolCatalog::WikiFinishIngest(_) => None,
         };
     }
 

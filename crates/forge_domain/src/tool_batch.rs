@@ -666,10 +666,18 @@ mod tests {
 
     #[test]
     fn test_lazy_tool_not_loaded_names_the_load_call() {
+        // The request publishes everything except the lazy `lsp`.
+        let published: Vec<ToolDefinition> = surface()
+            .into_iter()
+            .filter(|tool| tool.name.as_str() != "lsp")
+            .collect();
         let fixture = vec![call("lsp", r#"{}"#, "1")];
-        let actual = normalize_batch(&fixture, &surface(), resolve, |_| {
-            Absent::NotLoaded("native:lsp".to_string())
-        });
+        let actual = normalize_batch(
+            &fixture,
+            &published,
+            |_| None,
+            |_| Absent::NotLoaded("native:lsp".to_string()),
+        );
         let expected = "lsp is not in the published tool set for this call. Fix: tool_discovery {\"load\":\"native:lsp\"} then re-issue the call on the next model call. Retrying unchanged will fail again.";
         assert_eq!(
             actual.calls[0].rejection.as_ref().unwrap().message(),

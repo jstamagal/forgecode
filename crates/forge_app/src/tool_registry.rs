@@ -23,8 +23,8 @@ use crate::mcp_executor::McpExecutor;
 use crate::task_jobs::TaskJobs;
 use crate::tool_executor::ToolExecutor;
 use crate::{
-    AgentRegistry, ConversationService, EnvironmentInfra, McpConfigManager, McpService,
-    PolicyService, ProviderService, Services, SkillFetchService,
+    AgentRegistry, CapabilityService, ConversationService, EnvironmentInfra, McpConfigManager,
+    McpService, PolicyService, ProviderService, Services, SkillFetchService,
 };
 
 /// Background task runs live as long as the process: the registry is rebuilt
@@ -212,6 +212,10 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ToolReg
             if let ToolCatalog::ToolDiscovery(discovery) = tool_input {
                 return self.run_discovery(agent, discovery, context).await;
             }
+            // T16: a kernel's cells call tools back through this registry.
+            if let ToolCatalog::Kernel(kernel) = tool_input {
+                return self.run_kernel(agent, kernel, context).await;
+            }
 
             let env = self.services.get_environment();
             if let Some(content) = tool_input.to_content(&env) {
@@ -299,6 +303,65 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ToolReg
         } else {
             Err(Error::NotFound(input.name).into())
         }
+    }
+
+    /// T16: the `kernel` tool. Cells reach tools through a bridge that runs
+    /// each `tools.<name>(...)` as a direct call of this agent (same policy,
+    /// schema, bans, hooks, read-before-edit), except `kernel`, `toolbox` and
+    /// `task`, which a cell cannot call.
+    async fn run_kernel(
+        &self,
+        agent: &Agent,
+        input: forge_domain::Kernel,
+        context: &ToolCallContext,
+    ) -> anyhow::Result<ToolOutput> {
+        const NOT_FROM_CELL: [&str; 3] = ["kernel", "toolbox", "task"];
+        let names: Vec<String> = context
+            .surface()
+            .published(&context.surface_state()?.snapshot())
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .filter(|name| !NOT_FROM_CELL.contains(&name.as_str()))
+            .collect();
+        let services = self.services.clone();
+        let agent = agent.clone();
+        let cell_context = context.clone();
+        let bridge: crate::CellToolBridge = Arc::new(move |tool: String, args: Value| {
+            let services = services.clone();
+            let agent = agent.clone();
+            let context = cell_context.clone();
+            Box::pin(async move {
+                if NOT_FROM_CELL.contains(&tool.as_str()) {
+                    return Err(format!(
+                        "{tool} cannot be called from a kernel cell; call it directly"
+                    ));
+                }
+                let call = ToolCallFull::new(ToolName::new(&tool))
+                    .arguments(forge_domain::ToolCallArguments::from(args));
+                let registry = ToolRegistry::new(services);
+                let result = registry
+                    .call_with_bounds(&agent, &context, call, false)
+                    .await;
+                let text = result
+                    .output
+                    .values
+                    .iter()
+                    .filter_map(forge_domain::ToolValue::as_str)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if result.output.is_error {
+                    Err(text)
+                } else {
+                    Ok(text)
+                }
+            })
+        });
+        let cwd = self.services.get_environment().cwd;
+        let text = self
+            .services
+            .run_kernel(input, cwd, context, bridge, names)
+            .await?;
+        Ok(ToolOutput::text(text))
     }
 
     /// T24: the `tool_discovery` tool. Searches the request's catalog or
@@ -642,6 +705,19 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ToolReg
         context: &ToolCallContext,
         call: ToolCallFull,
     ) -> ToolResult {
+        self.call_with_bounds(agent, context, call, true).await
+    }
+
+    /// [`Self::call`]; with `bounded` false the result is not clipped or
+    /// spilled (X11) — a kernel cell receives tool results whole, and only
+    /// what it prints reaches the model.
+    async fn call_with_bounds(
+        &self,
+        agent: &Agent,
+        context: &ToolCallContext,
+        call: ToolCallFull,
+        bounded: bool,
+    ) -> ToolResult {
         let call_id = call.call_id.clone();
         let tool_name = call.name.clone();
         let context = match &call_id {
@@ -649,10 +725,13 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ToolReg
             None => context.clone(),
         };
         let path = Self::touched_path(&call);
-        let output = self
-            .call_inner(agent, call, &context)
-            .await
-            .map(|output| self.bound(output, &context));
+        let output = self.call_inner(agent, call, &context).await.map(|output| {
+            if bounded {
+                self.bound(output, &context)
+            } else {
+                output
+            }
+        });
         // T21: the first time a file matching a skill's `paths` is read or
         // edited, the result offers that skill once.
         let output = match (output, path) {

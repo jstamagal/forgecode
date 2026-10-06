@@ -410,6 +410,46 @@ pub trait PlanCreateService: Send + Sync {
     ) -> anyhow::Result<PlanCreateOutput>;
 }
 
+/// Runs one tool on behalf of a kernel cell (T16 tool bridge): the same
+/// dispatch as a direct call. Returns the result text, or the error text.
+pub type CellToolBridge = std::sync::Arc<
+    dyn Fn(String, serde_json::Value) -> futures::future::BoxFuture<'static, Result<String, String>>
+        + Send
+        + Sync,
+>;
+
+/// The phase 7 capability tools (T11–T19, T25): terminal, lsp, kernel,
+/// toolbox, browse, browser_probe, web/doc search, notebook_edit and the wiki
+/// helpers. One service so `Services` stays small.
+#[async_trait::async_trait]
+pub trait CapabilityService: Send + Sync {
+    /// Runs one capability tool. `cwd` is the working directory; paths in
+    /// `input` are already absolute and jail-confined.
+    ///
+    /// # Errors
+    /// Returns the error the model should see.
+    async fn run_capability(
+        &self,
+        input: forge_domain::ToolCatalog,
+        cwd: std::path::PathBuf,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<forge_domain::ToolOutput>;
+
+    /// The kernel tool (T16). `bridge` runs `tools.<name>(...)` calls from
+    /// cells; `names` lists what a cell may call.
+    ///
+    /// # Errors
+    /// Returns the error the model should see.
+    async fn run_kernel(
+        &self,
+        input: forge_domain::Kernel,
+        cwd: std::path::PathBuf,
+        context: &forge_domain::ToolCallContext,
+        bridge: CellToolBridge,
+        names: Vec<String>,
+    ) -> anyhow::Result<String>;
+}
+
 #[async_trait::async_trait]
 pub trait FsPatchService: Send + Sync {
     /// Applies `edits` in order to the file at `path`, all-or-nothing, and
@@ -727,6 +767,7 @@ pub trait Services: Send + Sync + 'static + Clone + EnvironmentInfra {
     type ProviderAuthService: ProviderAuthService;
     type WorkspaceService: WorkspaceService;
     type SkillFetchService: SkillFetchService;
+    type CapabilityService: CapabilityService;
 
     fn provider_service(&self) -> &Self::ProviderService;
     fn config_service(&self) -> &Self::AppConfigService;
@@ -754,6 +795,34 @@ pub trait Services: Send + Sync + 'static + Clone + EnvironmentInfra {
     fn provider_auth_service(&self) -> &Self::ProviderAuthService;
     fn workspace_service(&self) -> &Self::WorkspaceService;
     fn skill_fetch_service(&self) -> &Self::SkillFetchService;
+    fn capability_service(&self) -> &Self::CapabilityService;
+}
+
+#[async_trait::async_trait]
+impl<I: Services> CapabilityService for I {
+    async fn run_capability(
+        &self,
+        input: forge_domain::ToolCatalog,
+        cwd: std::path::PathBuf,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<forge_domain::ToolOutput> {
+        self.capability_service()
+            .run_capability(input, cwd, context)
+            .await
+    }
+
+    async fn run_kernel(
+        &self,
+        input: forge_domain::Kernel,
+        cwd: std::path::PathBuf,
+        context: &forge_domain::ToolCallContext,
+        bridge: CellToolBridge,
+        names: Vec<String>,
+    ) -> anyhow::Result<String> {
+        self.capability_service()
+            .run_kernel(input, cwd, context, bridge, names)
+            .await
+    }
 }
 
 #[async_trait::async_trait]

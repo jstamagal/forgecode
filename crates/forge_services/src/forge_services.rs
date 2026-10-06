@@ -25,8 +25,8 @@ use crate::policy::ForgePolicyService;
 use crate::provider_service::ForgeProviderService;
 use crate::template::ForgeTemplateService;
 use crate::tool_services::{
-    ForgeFetch, ForgeFsPatch, ForgeFsRead, ForgeFsRemove, ForgeFsSearch, ForgeFsUndo, ForgeFsWrite,
-    ForgeImageRead, ForgePlanCreate, ForgeShell, ForgeSkillFetch,
+    ForgeCapabilities, ForgeFetch, ForgeFsPatch, ForgeFsRead, ForgeFsRemove, ForgeFsSearch,
+    ForgeFsUndo, ForgeFsWrite, ForgeImageRead, ForgePlanCreate, ForgeShell, ForgeSkillFetch,
 };
 
 type McpService<F> = ForgeMcpService<ForgeMcpManager<F>, F, <F as McpServerInfra>::Client>;
@@ -80,6 +80,7 @@ pub struct ForgeServices<
     provider_auth_service: ForgeProviderAuthService<F>,
     workspace_service: Arc<crate::context_engine::ForgeWorkspaceService<F, FdDefault<F>>>,
     skill_service: Arc<ForgeSkillFetch<F>>,
+    capability_service: Arc<ForgeCapabilities<F>>,
     infra: Arc<F>,
 }
 
@@ -136,6 +137,7 @@ impl<
             discovery,
         ));
         let skill_service = Arc::new(ForgeSkillFetch::new(infra.clone()));
+        let capability_service = Arc::new(ForgeCapabilities::new(infra.clone()));
 
         Self {
             conversation_service,
@@ -163,6 +165,7 @@ impl<
             provider_auth_service,
             workspace_service,
             skill_service,
+            capability_service,
             chat_service,
             infra,
         }
@@ -226,6 +229,7 @@ impl<
     type ProviderService = ForgeProviderService<F>;
     type WorkspaceService = crate::context_engine::ForgeWorkspaceService<F, FdDefault<F>>;
     type SkillFetchService = ForgeSkillFetch<F>;
+    type CapabilityService = ForgeCapabilities<F>;
 
     fn config_service(&self) -> &Self::AppConfigService {
         &self.config_service
@@ -320,6 +324,10 @@ impl<
     }
     fn skill_fetch_service(&self) -> &Self::SkillFetchService {
         &self.skill_service
+    }
+
+    fn capability_service(&self) -> &Self::CapabilityService {
+        &self.capability_service
     }
 
     fn provider_service(&self) -> &Self::ProviderService {

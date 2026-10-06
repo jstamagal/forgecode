@@ -14,7 +14,11 @@ use serde_json::Map;
 use strum::IntoEnumIterator;
 use strum_macros::{AsRefStr, Display, EnumDiscriminants, EnumIter};
 
-use crate::{ToolCallArguments, ToolCallFull, ToolDefinition, ToolDescription, ToolName};
+use crate::{
+    Browse, BrowserProbe, DocsSearch, ExaSearch, Kernel, Lsp, NotebookEdit, SerperSearch,
+    TavilySearch, TerminalSession, TerminalSnapshot, ToolCallArguments, ToolCallFull,
+    ToolDefinition, ToolDescription, ToolName, Toolbox, WikiConvert, WikiFinishIngest, WikiWrite,
+};
 
 /// Enum representing all possible tool input types.
 ///
@@ -70,6 +74,21 @@ pub enum ToolCatalog {
     #[from(ignore)]
     McpPromptList(McpServerArg),
     McpPromptGet(McpPromptArg),
+    TerminalSession(TerminalSession),
+    TerminalSnapshot(TerminalSnapshot),
+    Lsp(Lsp),
+    Kernel(Kernel),
+    Toolbox(Toolbox),
+    Browse(Browse),
+    BrowserProbe(BrowserProbe),
+    SerperSearch(SerperSearch),
+    TavilySearch(TavilySearch),
+    ExaSearch(ExaSearch),
+    DocsSearch(DocsSearch),
+    NotebookEdit(NotebookEdit),
+    WikiConvert(WikiConvert),
+    WikiWrite(WikiWrite),
+    WikiFinishIngest(WikiFinishIngest),
 }
 
 /// Input for MCP controls that act on a whole server (M3).
@@ -1023,6 +1042,21 @@ impl ToolDescription for ToolCatalog {
             | ToolCatalog::McpResourceUnsubscribe(_)
             | ToolCatalog::McpPromptList(_)
             | ToolCatalog::McpPromptGet(_) => self.mcp_control_description().unwrap_or_default(),
+            ToolCatalog::TerminalSession(v) => v.description(),
+            ToolCatalog::TerminalSnapshot(v) => v.description(),
+            ToolCatalog::Lsp(v) => v.description(),
+            ToolCatalog::Kernel(v) => v.description(),
+            ToolCatalog::Toolbox(v) => v.description(),
+            ToolCatalog::Browse(v) => v.description(),
+            ToolCatalog::BrowserProbe(v) => v.description(),
+            ToolCatalog::SerperSearch(v) => v.description(),
+            ToolCatalog::TavilySearch(v) => v.description(),
+            ToolCatalog::ExaSearch(v) => v.description(),
+            ToolCatalog::DocsSearch(v) => v.description(),
+            ToolCatalog::NotebookEdit(v) => v.description(),
+            ToolCatalog::WikiConvert(v) => v.description(),
+            ToolCatalog::WikiWrite(v) => v.description(),
+            ToolCatalog::WikiFinishIngest(v) => v.description(),
         }
     }
 }
@@ -1106,6 +1140,21 @@ impl ToolCatalog {
                 r#gen.into_root_schema_for::<McpResourceArg>()
             }
             ToolCatalog::McpPromptGet(_) => r#gen.into_root_schema_for::<McpPromptArg>(),
+            ToolCatalog::TerminalSession(_) => r#gen.into_root_schema_for::<TerminalSession>(),
+            ToolCatalog::TerminalSnapshot(_) => r#gen.into_root_schema_for::<TerminalSnapshot>(),
+            ToolCatalog::Lsp(_) => r#gen.into_root_schema_for::<Lsp>(),
+            ToolCatalog::Kernel(_) => r#gen.into_root_schema_for::<Kernel>(),
+            ToolCatalog::Toolbox(_) => r#gen.into_root_schema_for::<Toolbox>(),
+            ToolCatalog::Browse(_) => r#gen.into_root_schema_for::<Browse>(),
+            ToolCatalog::BrowserProbe(_) => r#gen.into_root_schema_for::<BrowserProbe>(),
+            ToolCatalog::SerperSearch(_) => r#gen.into_root_schema_for::<SerperSearch>(),
+            ToolCatalog::TavilySearch(_) => r#gen.into_root_schema_for::<TavilySearch>(),
+            ToolCatalog::ExaSearch(_) => r#gen.into_root_schema_for::<ExaSearch>(),
+            ToolCatalog::DocsSearch(_) => r#gen.into_root_schema_for::<DocsSearch>(),
+            ToolCatalog::NotebookEdit(_) => r#gen.into_root_schema_for::<NotebookEdit>(),
+            ToolCatalog::WikiConvert(_) => r#gen.into_root_schema_for::<WikiConvert>(),
+            ToolCatalog::WikiWrite(_) => r#gen.into_root_schema_for::<WikiWrite>(),
+            ToolCatalog::WikiFinishIngest(_) => r#gen.into_root_schema_for::<WikiFinishIngest>(),
         };
 
         // Apply transform to add nullable property and remove null from type
@@ -1165,7 +1214,19 @@ impl ToolCatalog {
             | ToolCatalog::McpResourceTemplates(_)
             | ToolCatalog::McpResourceRead(_)
             | ToolCatalog::McpPromptList(_)
-            | ToolCatalog::McpPromptGet(_) => true,
+            | ToolCatalog::McpPromptGet(_)
+            | ToolCatalog::TerminalSnapshot(_)
+            | ToolCatalog::Lsp(_)
+            | ToolCatalog::Browse(_)
+            | ToolCatalog::SerperSearch(_)
+            | ToolCatalog::TavilySearch(_)
+            | ToolCatalog::ExaSearch(_)
+            | ToolCatalog::DocsSearch(_)
+            | ToolCatalog::WikiConvert(_) => true,
+            ToolCatalog::Toolbox(input) => matches!(
+                input.action.as_deref().unwrap_or("list"),
+                "list" | "show" | "history"
+            ),
             _ => false,
         }
     }
@@ -1185,6 +1246,10 @@ impl ToolCatalog {
                 | ToolCatalog::McpResourceUnsubscribe(_)
                 | ToolCatalog::McpPromptList(_)
                 | ToolCatalog::McpPromptGet(_)
+                | ToolCatalog::Kernel(_)
+                | ToolCatalog::TerminalSession(_)
+                | ToolCatalog::Browse(_)
+                | ToolCatalog::BrowserProbe(_)
         )
     }
 
@@ -1288,6 +1353,79 @@ impl ToolCatalog {
                 cwd,
                 message: format!("Fetch content from URL: {}", input.url),
             }),
+            ToolCatalog::TerminalSession(input) => input.command.as_ref().map(|command| {
+                crate::policies::PermissionOperation::Execute { command: command.clone(), cwd }
+            }),
+            ToolCatalog::Kernel(input) => {
+                input
+                    .code
+                    .as_ref()
+                    .map(|code| crate::policies::PermissionOperation::Execute {
+                        command: code.clone(),
+                        cwd,
+                    })
+            }
+            ToolCatalog::Browse(input) => Some(crate::policies::PermissionOperation::Fetch {
+                url: input.url.clone(),
+                cwd,
+                message: format!("Render page: {}", input.url),
+            }),
+            ToolCatalog::BrowserProbe(input) => Some(crate::policies::PermissionOperation::Fetch {
+                url: input.target.clone(),
+                cwd,
+                message: format!("Probe page in Chromium: {}", input.target),
+            }),
+            ToolCatalog::SerperSearch(input) => Some(crate::policies::PermissionOperation::Fetch {
+                url: "https://google.serper.dev/search".to_string(),
+                cwd,
+                message: format!("Web search: {}", input.query),
+            }),
+            ToolCatalog::TavilySearch(input) => Some(crate::policies::PermissionOperation::Fetch {
+                url: "https://api.tavily.com/search".to_string(),
+                cwd,
+                message: format!("Web search: {}", input.query),
+            }),
+            ToolCatalog::ExaSearch(input) => Some(crate::policies::PermissionOperation::Fetch {
+                url: "https://api.exa.ai/search".to_string(),
+                cwd,
+                message: format!("Web search: {}", input.query),
+            }),
+            ToolCatalog::DocsSearch(input) => Some(crate::policies::PermissionOperation::Fetch {
+                url: "https://context7.com/api/v1/search".to_string(),
+                cwd,
+                message: format!("Library docs: {}", input.library),
+            }),
+            ToolCatalog::Lsp(input) => Some(crate::policies::PermissionOperation::Read {
+                path: std::path::PathBuf::from(&input.file_path),
+                cwd,
+                message: format!(
+                    "Language server {} on {}",
+                    input.operation,
+                    display_path_for(&input.file_path)
+                ),
+            }),
+            ToolCatalog::NotebookEdit(input) => Some(crate::policies::PermissionOperation::Write {
+                path: std::path::PathBuf::from(&input.file_path),
+                cwd,
+                message: format!("Edit notebook: {}", display_path_for(&input.file_path)),
+            }),
+            ToolCatalog::WikiConvert(input) => Some(crate::policies::PermissionOperation::Read {
+                path: std::path::PathBuf::from(&input.file_path),
+                cwd,
+                message: format!("Convert for wiki: {}", display_path_for(&input.file_path)),
+            }),
+            ToolCatalog::WikiWrite(input) => Some(crate::policies::PermissionOperation::Write {
+                path: std::path::PathBuf::from(&input.vault),
+                cwd,
+                message: format!("Write wiki page: {}", input.title),
+            }),
+            ToolCatalog::WikiFinishIngest(input) => {
+                Some(crate::policies::PermissionOperation::Write {
+                    path: std::path::PathBuf::from(&input.vault),
+                    cwd,
+                    message: format!("Finish wiki ingest: {}", input.source),
+                })
+            }
             // Operations that don't require permission checks
             ToolCatalog::Undo(_)
             | ToolCatalog::Plan(_)
@@ -1295,6 +1433,8 @@ impl ToolCatalog {
             | ToolCatalog::TodoWrite(_)
             | ToolCatalog::TodoRead(_)
             | ToolCatalog::ToolDiscovery(_)
+            | ToolCatalog::TerminalSnapshot(_)
+            | ToolCatalog::Toolbox(_)
             | ToolCatalog::McpResourceList(_)
             | ToolCatalog::McpResourceTemplates(_)
             | ToolCatalog::McpResourceRead(_)

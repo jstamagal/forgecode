@@ -1,0 +1,4 @@
+Ask a language server about a source file: `diagnostics` (errors and warnings in the file), `definition`, `references` or `hover` (type and docs) at a position. The server is picked by extension from what is on PATH: rust-analyzer for Rust, basedpyright or pyright for Python, gopls for Go, typescript-language-server for TypeScript and JavaScript, clangd for C and C++. A file no installed server covers returns an error naming what was looked for.
+- Each call sends the file as it is on disk now, so call `diagnostics` after an edit to check it. The first call for a project starts the server and can take a while; later calls reuse it. A server still indexing may return nothing; call again.
+- A position is `line` and `character`, both 1-based.
+- Locations come back as `path:line:column: source line`, relative to the working directory when under it.

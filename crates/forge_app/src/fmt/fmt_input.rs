@@ -159,6 +159,102 @@ impl FormatContent for ToolCatalog {
                     .sub_title(format!("{} {}", input.server, input.name))
                     .into(),
             ),
+            ToolCatalog::TerminalSession(input) => Some(
+                TitleFormat::debug(format!("Terminal {}", input.action))
+                    .sub_title(
+                        input
+                            .command
+                            .clone()
+                            .or_else(|| input.keys.clone())
+                            .unwrap_or_else(|| {
+                                input.session.clone().unwrap_or_else(|| "main".to_string())
+                            }),
+                    )
+                    .into(),
+            ),
+            ToolCatalog::TerminalSnapshot(input) => Some(
+                TitleFormat::debug("Terminal snapshot")
+                    .sub_title(input.session.clone().unwrap_or_else(|| "main".to_string()))
+                    .into(),
+            ),
+            ToolCatalog::Lsp(input) => Some(
+                TitleFormat::debug(format!("LSP {}", input.operation))
+                    .sub_title(display_path_for(&input.file_path))
+                    .into(),
+            ),
+            ToolCatalog::Kernel(input) => Some(
+                TitleFormat::debug(format!(
+                    "Kernel {}",
+                    input.action.as_deref().unwrap_or("run")
+                ))
+                .sub_title(
+                    input
+                        .code
+                        .as_deref()
+                        .and_then(|c| c.lines().next())
+                        .unwrap_or_default(),
+                )
+                .into(),
+            ),
+            ToolCatalog::Toolbox(input) => Some(
+                TitleFormat::debug(format!(
+                    "Toolbox {}",
+                    input.action.as_deref().unwrap_or("list")
+                ))
+                .sub_title(input.name.clone().unwrap_or_default())
+                .into(),
+            ),
+            ToolCatalog::Browse(input) => {
+                Some(TitleFormat::debug("Browse").sub_title(&input.url).into())
+            }
+            ToolCatalog::BrowserProbe(input) => Some(
+                TitleFormat::debug("Browser probe")
+                    .sub_title(&input.target)
+                    .into(),
+            ),
+            ToolCatalog::SerperSearch(input) => Some(
+                TitleFormat::debug("Serper search")
+                    .sub_title(&input.query)
+                    .into(),
+            ),
+            ToolCatalog::TavilySearch(input) => Some(
+                TitleFormat::debug("Tavily search")
+                    .sub_title(&input.query)
+                    .into(),
+            ),
+            ToolCatalog::ExaSearch(input) => Some(
+                TitleFormat::debug("Exa search")
+                    .sub_title(&input.query)
+                    .into(),
+            ),
+            ToolCatalog::DocsSearch(input) => Some(
+                TitleFormat::debug("Docs search")
+                    .sub_title(&input.library)
+                    .into(),
+            ),
+            ToolCatalog::NotebookEdit(input) => Some(
+                TitleFormat::debug(format!(
+                    "Notebook {}",
+                    input.edit_mode.as_deref().unwrap_or("replace")
+                ))
+                .sub_title(display_path_for(&input.file_path))
+                .into(),
+            ),
+            ToolCatalog::WikiConvert(input) => Some(
+                TitleFormat::debug("Wiki convert")
+                    .sub_title(display_path_for(&input.file_path))
+                    .into(),
+            ),
+            ToolCatalog::WikiWrite(input) => Some(
+                TitleFormat::debug("Wiki write")
+                    .sub_title(&input.title)
+                    .into(),
+            ),
+            ToolCatalog::WikiFinishIngest(input) => Some(
+                TitleFormat::debug("Wiki finish ingest")
+                    .sub_title(&input.source)
+                    .into(),
+            ),
         }
     }
 }
