@@ -67,9 +67,9 @@ pub struct TemplateConfig {
     /// Maximum number of lines returned by a single file read (maps to
     /// `ForgeConfig::max_read_lines`).
     pub max_read_size: usize,
-    /// Maximum characters per line before truncation (maps to
-    /// `ForgeConfig::max_line_chars`).
-    pub max_line_length: usize,
+    /// Largest file a whole-file read returns, in bytes (maps to
+    /// `ForgeConfig::max_read_bytes`).
+    pub max_read_bytes: usize,
     /// Maximum image size in bytes accepted by the read tool (maps to
     /// `ForgeConfig::max_image_size_bytes`).
     pub max_image_size: usize,

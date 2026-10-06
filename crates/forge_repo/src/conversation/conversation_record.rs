@@ -872,6 +872,8 @@ pub(super) struct MetricsRecord {
     files_changed: std::collections::HashMap<String, FileOperationOrArray>,
     #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
     files_accessed: std::collections::HashSet<String>,
+    #[serde(default)]
+    reads: forge_domain::SharedLedger,
 }
 
 impl From<&forge_domain::Metrics> for MetricsRecord {
@@ -889,6 +891,7 @@ impl From<&forge_domain::Metrics> for MetricsRecord {
                 })
                 .collect(),
             files_accessed: metrics.files_accessed.clone(),
+            reads: metrics.reads.clone(),
         }
     }
 }
@@ -933,6 +936,7 @@ impl From<MetricsRecord> for forge_domain::Metrics {
             file_operations,
             files_accessed,
             todos: Vec::new(),
+            reads: record.reads,
         }
     }
 }

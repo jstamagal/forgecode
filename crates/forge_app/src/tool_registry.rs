@@ -6,7 +6,7 @@ use console::style;
 use forge_domain::{
     Agent, AgentId, AgentInput, ChatResponse, ChatResponseContent, Environment, InputModality,
     Model, SystemContext, TemplateConfig, ToolCallContext, ToolCallFull, ToolCatalog,
-    ToolDefinition, ToolKind, ToolName, ToolOutput, ToolResult,
+    ToolDefinition, ToolName, ToolOutput, ToolResult,
 };
 use forge_template::Element;
 use futures::future::join_all;
@@ -154,17 +154,21 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ToolReg
                 ));
             }
 
-            // Validate tool modality support before execution
-            // Only resolve the current model when modality validation is
-            // needed.
-            if matches!(&tool_input, ToolCatalog::Read(input) if Self::has_image_extension(&input.file_path))
+            // Images come back as images only for models with image input;
+            // the read service falls back to text (PDF text, image stub)
+            // otherwise. Only resolve the model when a visual file is read.
+            let context = if matches!(&tool_input, ToolCatalog::Read(input) if Self::has_image_extension(&input.file_path))
             {
                 let model = self.get_current_model().await;
-                Self::validate_tool_modality(&tool_input, model.as_ref())?;
-            }
+                context
+                    .clone()
+                    .with_vision(Self::supports_images(model.as_ref()))
+            } else {
+                context.clone()
+            };
 
             self.call_with_timeout(&tool_name, || {
-                self.tool_executor.execute(tool_input, context)
+                self.tool_executor.execute(tool_input, &context)
             })
             .await
         } else if self.agent_executor.contains_tool(&input.name).await? {
@@ -221,7 +225,11 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ToolReg
     ) -> ToolResult {
         let call_id = call.call_id.clone();
         let tool_name = call.name.clone();
-        let output = self.call_inner(agent, call, context).await;
+        let context = match &call_id {
+            Some(id) => context.clone().with_call_id(id.as_str()),
+            None => context.clone(),
+        };
+        let output = self.call_inner(agent, call, &context).await;
 
         ToolResult::new(tool_name).call_id(call_id).output(output)
     }
@@ -269,7 +277,7 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ToolReg
 
         let template_config = TemplateConfig {
             max_read_size: config.max_read_lines as usize,
-            max_line_length: config.max_line_chars,
+            max_read_bytes: config.max_read_bytes as usize,
             max_image_size: config.max_image_size_bytes as usize,
             stdout_max_prefix_length: config.max_stdout_prefix_lines,
             stdout_max_suffix_length: config.max_stdout_suffix_lines,
@@ -363,57 +371,14 @@ impl<S> ToolRegistry<S> {
         IMAGE_EXTENSIONS.iter().any(|ext| path_lower.ends_with(ext))
     }
 
-    /// Validates if a tool's modality requirements are supported by the current
-    /// model.
-    ///
-    /// # Validation Process
-    /// Checks if the tool requires image input support and if the model
-    /// supports it. Currently, only the `read` tool can potentially require
-    /// image modality.
-    fn validate_tool_modality(
-        tool_input: &ToolCatalog,
-        model: Option<&Model>,
-    ) -> Result<(), Error> {
-        // Check if this tool might require image support
-        // Currently, only the read tool can return image content
-        if let ToolCatalog::Read(input) = tool_input {
-            // Check if the file extension suggests it's an image
-            if Self::has_image_extension(&input.file_path) {
-                // Check if the model supports image input
-                let supports_image = model
-                    .and_then(|m| {
-                        m.input_modalities
-                            .iter()
-                            .find(|im| matches!(im, InputModality::Image))
-                    })
-                    .is_some();
-
-                if !supports_image {
-                    let tool_name = ToolKind::Read.name();
-                    let required_modality = "image".to_string();
-                    let supported_modalities = model
-                        .map(|m| {
-                            m.input_modalities
-                                .iter()
-                                .map(|im| match im {
-                                    InputModality::Text => "text".to_string(),
-                                    InputModality::Image => "image".to_string(),
-                                })
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        })
-                        .unwrap_or_else(|| "unknown".to_string());
-
-                    return Err(Error::UnsupportedModality {
-                        tool_name,
-                        required_modality,
-                        supported_modalities,
-                    });
-                }
-            }
-        }
-
-        Ok(())
+    /// Whether `model` accepts image input. An unknown model is treated as
+    /// text-only.
+    fn supports_images(model: Option<&Model>) -> bool {
+        model.is_some_and(|m| {
+            m.input_modalities
+                .iter()
+                .any(|im| matches!(im, InputModality::Image))
+        })
     }
 }
 
@@ -763,14 +728,10 @@ fn test_template_rendering_in_tool_descriptions() {
     use fake::{Fake, Faker};
 
     let env: Environment = Faker.fake();
-    let template_config = TemplateConfig { max_line_length: 2000, ..Default::default() };
+    let template_config = TemplateConfig { max_read_bytes: 262144, ..Default::default() };
 
-    let actual = ToolRegistry::<()>::get_system_tools(
-        &env,
-        None,
-        create_test_agents(),
-        &template_config,
-    );
+    let actual =
+        ToolRegistry::<()>::get_system_tools(&env, None, create_test_agents(), &template_config);
     let fs_search_tool = actual
         .iter()
         .find(|t| t.name.as_str() == "fs_search")
@@ -799,7 +760,7 @@ fn test_dynamic_tool_description_with_vision_model() {
     let env: Environment = Faker.fake();
     let template_config = TemplateConfig {
         max_read_size: 2000,
-        max_line_length: 2000,
+        max_read_bytes: 262144,
         max_image_size: 5000,
         ..Default::default()
     };
@@ -826,7 +787,7 @@ fn test_dynamic_tool_description_with_text_only_model() {
     let env: Environment = Faker.fake();
     let template_config = TemplateConfig {
         max_read_size: 2000,
-        max_line_length: 2000,
+        max_read_bytes: 262144,
         max_image_size: 5000,
         ..Default::default()
     };
@@ -848,87 +809,18 @@ fn test_dynamic_tool_description_with_text_only_model() {
 }
 
 #[test]
-fn test_validate_tool_modality_with_image_file_and_vision_model() {
-    use forge_domain::{InputModality, ToolCatalog};
+fn test_supports_images() {
+    use forge_domain::InputModality;
 
-    let vision_model = create_test_model("gpt-4o", vec![InputModality::Text, InputModality::Image]);
-    let tool_input = ToolCatalog::Read(forge_domain::FSRead {
-        file_path: "/home/user/test.png".to_string(),
-        ..Default::default()
-    });
-
-    let result = ToolRegistry::<()>::validate_tool_modality(&tool_input, Some(&vision_model));
-    assert!(result.is_ok(), "Vision model should support image files");
-}
-
-#[test]
-fn test_validate_tool_modality_with_image_file_and_text_only_model() {
-    use forge_domain::{InputModality, ToolCatalog};
-
-    let text_only_model = create_test_model("gpt-3.5-turbo", vec![InputModality::Text]);
-    let tool_input = ToolCatalog::Read(forge_domain::FSRead {
-        file_path: "/home/user/test.png".to_string(),
-        ..Default::default()
-    });
-
-    let result = ToolRegistry::<()>::validate_tool_modality(&tool_input, Some(&text_only_model));
-    assert!(
-        result.is_err(),
-        "Text-only model should not support image files"
+    let vision = create_test_model("gpt-4o", vec![InputModality::Text, InputModality::Image]);
+    let text_only = create_test_model("gpt-3.5-turbo", vec![InputModality::Text]);
+    let actual = (
+        ToolRegistry::<()>::supports_images(Some(&vision)),
+        ToolRegistry::<()>::supports_images(Some(&text_only)),
+        ToolRegistry::<()>::supports_images(None),
     );
-
-    let error = result.unwrap_err();
-    assert!(error.to_string().contains("requires image modality"));
-    assert!(error.to_string().contains("read"));
-}
-
-#[test]
-fn test_validate_tool_modality_with_text_file_and_text_only_model() {
-    use forge_domain::{InputModality, ToolCatalog};
-
-    let text_only_model = create_test_model("gpt-3.5-turbo", vec![InputModality::Text]);
-    let tool_input = ToolCatalog::Read(forge_domain::FSRead {
-        file_path: "/home/user/test.txt".to_string(),
-        ..Default::default()
-    });
-
-    let result = ToolRegistry::<()>::validate_tool_modality(&tool_input, Some(&text_only_model));
-    assert!(result.is_ok(), "Text-only model should support text files");
-}
-
-#[test]
-fn test_validate_tool_modality_with_no_model() {
-    use forge_domain::ToolCatalog;
-
-    let tool_input = ToolCatalog::Read(forge_domain::FSRead {
-        file_path: "/home/user/test.png".to_string(),
-        ..Default::default()
-    });
-
-    let result = ToolRegistry::<()>::validate_tool_modality(&tool_input, None);
-    assert!(result.is_err(), "Should error when no model is available");
-
-    let error = result.unwrap_err();
-    assert!(error.to_string().contains("requires image modality"));
-    assert!(error.to_string().contains("unknown"));
-}
-
-#[test]
-fn test_validate_tool_modality_with_non_read_tool() {
-    use forge_domain::{InputModality, ToolCatalog};
-
-    let text_only_model = create_test_model("gpt-3.5-turbo", vec![InputModality::Text]);
-    let tool_input = ToolCatalog::Write(forge_domain::FSWrite {
-        file_path: "/home/user/test.png".to_string(),
-        content: "test".to_string(),
-        ..Default::default()
-    });
-
-    let result = ToolRegistry::<()>::validate_tool_modality(&tool_input, Some(&text_only_model));
-    assert!(
-        result.is_ok(),
-        "Non-read tools should pass modality validation"
-    );
+    let expected = (true, false, false);
+    pretty_assertions::assert_eq!(actual, expected);
 }
 
 #[test]
@@ -981,17 +873,13 @@ fn test_dynamic_tool_description_without_model() {
     let template_config = TemplateConfig {
         max_read_size: 2000,
         max_image_size: 5000,
-        max_line_length: 2000,
+        max_read_bytes: 262144,
         ..Default::default()
     };
 
     // When no model is provided, should default to showing minimal capabilities
-    let tools_no_model = ToolRegistry::<()>::get_system_tools(
-        &env,
-        None,
-        create_test_agents(),
-        &template_config,
-    );
+    let tools_no_model =
+        ToolRegistry::<()>::get_system_tools(&env, None, create_test_agents(), &template_config);
     let read_tool = tools_no_model
         .iter()
         .find(|t| t.name.as_str() == "read")
@@ -1010,19 +898,15 @@ fn test_all_rendered_tool_descriptions() {
 
     let template_config = TemplateConfig {
         max_read_size: 2000,
-        max_line_length: 2000,
+        max_read_bytes: 262144,
         max_image_size: 5000,
         stdout_max_prefix_length: 200,
         stdout_max_suffix_length: 200,
         stdout_max_line_length: 2000,
     };
 
-    let tools = ToolRegistry::<()>::get_system_tools(
-        &env,
-        None,
-        create_test_agents(),
-        &template_config,
-    );
+    let tools =
+        ToolRegistry::<()>::get_system_tools(&env, None, create_test_agents(), &template_config);
 
     // Verify all tools have rendered descriptions (no template syntax left)
     for tool in &tools {

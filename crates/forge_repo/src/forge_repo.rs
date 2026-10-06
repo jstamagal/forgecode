@@ -13,7 +13,7 @@ use forge_domain::{
     AnyProvider, AuthCredential, ChatCompletionMessage, ChatRepository, CommandOutput, Context,
     Conversation, ConversationId, ConversationRepository, Environment, FileInfo, McpServerConfig,
     MigrationResult, Model, ModelId, Provider, ProviderId, ProviderRepository, ResultStream, Skill,
-    SkillRepository, Snapshot, SnapshotRepository,
+    SkillRepository, SnapshotRepository,
 };
 use forge_eventsource::EventSource;
 // Re-export CacacheStorage from forge_infra
@@ -92,12 +92,45 @@ impl<
 
 #[async_trait::async_trait]
 impl<F: Send + Sync> SnapshotRepository for ForgeRepo<F> {
-    async fn insert_snapshot(&self, file_path: &Path) -> anyhow::Result<Snapshot> {
-        self.file_snapshot_service.insert_snapshot(file_path).await
+    async fn insert_snapshot(
+        &self,
+        conversation: &ConversationId,
+        path: &Path,
+        coverage: Option<forge_domain::SnapshotCoverage>,
+    ) -> anyhow::Result<Vec<String>> {
+        self.file_snapshot_service
+            .insert_snapshot(conversation, path, coverage)
+            .await
     }
 
-    async fn undo_snapshot(&self, file_path: &Path) -> anyhow::Result<()> {
-        self.file_snapshot_service.undo_snapshot(file_path).await
+    async fn discard_snapshot(
+        &self,
+        conversation: &ConversationId,
+        path: &Path,
+    ) -> anyhow::Result<()> {
+        self.file_snapshot_service
+            .discard_snapshot(conversation, path)
+            .await
+    }
+
+    async fn undo_snapshot(
+        &self,
+        conversation: &ConversationId,
+        path: &Path,
+    ) -> anyhow::Result<forge_domain::UndoOutcome> {
+        self.file_snapshot_service
+            .undo_snapshot(conversation, path)
+            .await
+    }
+
+    async fn has_snapshot(
+        &self,
+        conversation: &ConversationId,
+        path: &Path,
+    ) -> anyhow::Result<bool> {
+        self.file_snapshot_service
+            .has_snapshot(conversation, path)
+            .await
     }
 }
 

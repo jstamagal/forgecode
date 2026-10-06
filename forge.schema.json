@@ -131,17 +131,17 @@
       "default": 0,
       "minimum": 0
     },
-    "max_line_chars": {
-      "description": "Maximum number of characters per line when reading a file.",
+    "max_parallel_file_reads": {
+      "description": "Maximum number of files read concurrently during batch operations.",
       "type": "integer",
       "format": "uint",
       "default": 0,
       "minimum": 0
     },
-    "max_parallel_file_reads": {
-      "description": "Maximum number of files read concurrently during batch operations.",
+    "max_read_bytes": {
+      "description": "Largest file, in bytes, a whole-file read (no range) returns; larger\nfiles must be read by line or byte range.",
       "type": "integer",
-      "format": "uint",
+      "format": "uint64",
       "default": 0,
       "minimum": 0
     },
@@ -212,6 +212,20 @@
         "null"
       ],
       "format": "uint",
+      "minimum": 0
+    },
+    "max_tool_result_bytes": {
+      "description": "Hard cap, in bytes, on any single tool result.",
+      "type": "integer",
+      "format": "uint64",
+      "default": 0,
+      "minimum": 0
+    },
+    "max_tool_result_inline_bytes": {
+      "description": "Tool results larger than this many bytes are spilled to a file and\nreplaced by a preview; also sizes one page of a byte-range read.",
+      "type": "integer",
+      "format": "uint64",
+      "default": 0,
       "minimum": 0
     },
     "merge_system_messages": {

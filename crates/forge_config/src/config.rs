@@ -142,12 +142,20 @@ pub struct ForgeConfig {
     /// Maximum number of characters per line in shell command output.
     #[serde(default)]
     pub max_stdout_line_chars: usize,
-    /// Maximum number of characters per line when reading a file.
-    #[serde(default)]
-    pub max_line_chars: usize,
     /// Maximum number of lines read from a file in a single operation.
     #[serde(default)]
     pub max_read_lines: u64,
+    /// Largest file, in bytes, a whole-file read (no range) returns; larger
+    /// files must be read by line or byte range.
+    #[serde(default)]
+    pub max_read_bytes: u64,
+    /// Tool results larger than this many bytes are spilled to a file and
+    /// replaced by a preview; also sizes one page of a byte-range read.
+    #[serde(default)]
+    pub max_tool_result_inline_bytes: u64,
+    /// Hard cap, in bytes, on any single tool result.
+    #[serde(default)]
+    pub max_tool_result_bytes: u64,
     /// Maximum number of files read in a single batch operation.
     #[serde(default)]
     pub max_file_read_batch_size: usize,

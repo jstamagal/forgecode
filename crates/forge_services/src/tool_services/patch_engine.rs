@@ -23,8 +23,6 @@ pub enum MatchError {
     UnsupportedSeparator,
     #[error("old_string cannot be empty")]
     EmptyOld,
-    #[error("old_string and new_string must be different")]
-    SameText,
     #[error(
         "old_string and new_string are identical after line-ending normalization, so this edit would not change the file"
     )]
@@ -74,63 +72,6 @@ pub struct EditOutcome {
     pub line_spans: Vec<(usize, usize)>,
     /// Change in line-break count caused by each replacement.
     pub line_delta: isize,
-}
-
-/// Result of applying a whole batch of edits.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BatchOutcome {
-    /// The text after every edit.
-    pub updated: String,
-    /// Replacement count: occurrences for `replace_all` edits, one otherwise.
-    pub replacements: usize,
-    /// Number of edits that needed the normalised fallback.
-    pub fuzzy_edits: usize,
-    /// Per edit, the outcome details in order.
-    pub edits: Vec<EditOutcome>,
-}
-
-/// Applies `edits` in order to `source`, each seeing the previous result.
-/// All-or-nothing: the first failing edit aborts the whole batch.
-///
-/// # Arguments
-/// * `source` - The current file text.
-/// * `edits` - Edits to apply in order.
-/// * `batch` - Whether the call used the `edits` form (controls error labels).
-///
-/// # Errors
-/// Returns [`PatchError`] naming the failing edit.
-pub fn apply_edits(
-    source: &str,
-    edits: &[EditRequest<'_>],
-    batch: bool,
-) -> Result<BatchOutcome, PatchError> {
-    let label = |index: usize, source: MatchError| {
-        if batch {
-            PatchError::Batch { index: index + 1, source }
-        } else {
-            PatchError::Single(source)
-        }
-    };
-
-    for (index, edit) in edits.iter().enumerate() {
-        if edit.old_string == edit.new_string {
-            return Err(label(index, MatchError::SameText));
-        }
-    }
-
-    let mut updated = source.to_string();
-    let mut replacements = 0;
-    let mut fuzzy_edits = 0;
-    let mut outcomes = Vec::with_capacity(edits.len());
-    for (index, edit) in edits.iter().enumerate() {
-        let outcome = apply_edit(&updated, edit).map_err(|error| label(index, error))?;
-        replacements += if edit.replace_all { outcome.count } else { 1 };
-        fuzzy_edits += usize::from(outcome.fuzzy);
-        updated = outcome.updated.clone();
-        outcomes.push(outcome);
-    }
-
-    Ok(BatchOutcome { updated, replacements, fuzzy_edits, edits: outcomes })
 }
 
 /// Applies one edit to `text`.
@@ -212,7 +153,13 @@ pub fn apply_edit(text: &str, edit: &EditRequest<'_>) -> Result<EditOutcome, Mat
     }
     let line_delta = count_line_breaks(&new) as isize - count_line_breaks(&old) as isize;
 
-    Ok(EditOutcome { updated, count: positions.len(), fuzzy, line_spans, line_delta })
+    Ok(EditOutcome {
+        updated,
+        count: positions.len(),
+        fuzzy,
+        line_spans,
+        line_delta,
+    })
 }
 
 /// Returns the dominant line ending of `text`: CRLF when present, CR when the
@@ -304,7 +251,11 @@ impl LineIndex {
     /// trailing line ending belongs to the line it ends.
     fn span(&self, text: &str, start: usize, end: usize) -> (usize, usize) {
         let content = text[start..end].trim_end_matches(['\r', '\n']).len();
-        let last = if content == 0 { start } else { start + content - 1 };
+        let last = if content == 0 {
+            start
+        } else {
+            start + content - 1
+        };
         let first_line = self.line_of(start);
         (first_line, self.line_of(last).max(first_line))
     }
@@ -436,7 +387,9 @@ fn widen_over_whitespace(
     let mut widened: Vec<(usize, usize)> = Vec::with_capacity(positions.len());
     for (index, &(mut start, mut end)) in positions.iter().enumerate() {
         let floor = widened.last().map_or(0, |&(_, end)| end);
-        let ceiling = positions.get(index + 1).map_or(text.len(), |&(start, _)| start);
+        let ceiling = positions
+            .get(index + 1)
+            .map_or(text.len(), |&(start, _)| start);
         for _ in 0..back {
             match text[..start].chars().next_back() {
                 Some(c) if start > floor && blank(c) => start -= c.len_utf8(),
@@ -681,9 +634,12 @@ mod tests {
     #[test]
     fn test_trailing_whitespace_and_nbsp_fallback() {
         let fixture = "fn a() {   \n    x\u{00a0}= 1;\n}\n";
-        let actual = apply_edit(fixture, &edit("fn a() {\n    x = 1;", "fn a() {\n    x = 2;"))
-            .unwrap()
-            .updated;
+        let actual = apply_edit(
+            fixture,
+            &edit("fn a() {\n    x = 1;", "fn a() {\n    x = 2;"),
+        )
+        .unwrap()
+        .updated;
         let expected = "fn a() {   \n    x\u{00a0}= 2;\n}\n";
         assert_eq!(actual, expected);
     }
@@ -701,7 +657,8 @@ mod tests {
     #[test]
     fn test_fuzzy_noop_is_refused() {
         let fixture = "say \u{201c}hi\u{201d}\n";
-        let actual = apply_edit(fixture, &edit("say \"hi\"", "say \u{201c}hi\u{201d}")).unwrap_err();
+        let actual =
+            apply_edit(fixture, &edit("say \"hi\"", "say \u{201c}hi\u{201d}")).unwrap_err();
         let expected = MatchError::FuzzyNoop;
         assert_eq!(actual, expected);
     }
@@ -719,9 +676,10 @@ mod tests {
     #[test]
     fn test_miss_with_nothing_similar() {
         let fixture = "abc\n";
-        let actual = apply_edit(fixture, &edit("zzzzzzzz", "y")).unwrap_err().to_string();
-        let expected =
-            "Could not find match for search text: \"zzzzzzzz\". Nothing similar is in the file; read it again.";
+        let actual = apply_edit(fixture, &edit("zzzzzzzz", "y"))
+            .unwrap_err()
+            .to_string();
+        let expected = "Could not find match for search text: \"zzzzzzzz\". Nothing similar is in the file; read it again.";
         assert_eq!(actual, expected);
     }
 
@@ -744,33 +702,6 @@ mod tests {
             line_spans: vec![(2, 3)],
             line_delta: -1,
         };
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn test_batch_applies_in_order() {
-        let fixture = "a\nb\n";
-        let actual = apply_edits(fixture, &[edit("a", "x"), edit("x\nb", "y")], true).unwrap();
-        let expected = "y\n";
-        assert_eq!(actual.updated, expected);
-        assert_eq!((actual.replacements, actual.fuzzy_edits), (2, 0));
-    }
-
-    #[test]
-    fn test_batch_failure_names_edit_index() {
-        let fixture = "a\nb\n";
-        let actual = apply_edits(fixture, &[edit("a", "x"), edit("missing", "y")], true)
-            .unwrap_err()
-            .to_string();
-        let expected = "edit 2: Could not find match for search text: \"missing\". Nothing similar is in the file; read it again.";
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn test_same_old_and_new_rejected_before_matching() {
-        let fixture = "a\n";
-        let actual = apply_edits(fixture, &[edit("a", "a")], false).unwrap_err();
-        let expected = PatchError::Single(MatchError::SameText);
         assert_eq!(actual, expected);
     }
 

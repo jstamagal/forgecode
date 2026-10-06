@@ -39,8 +39,11 @@ pub struct PatchOutput {
     pub fuzzy_edits: usize,
     /// Whether the call used the batch (`edits`) form.
     pub batch: bool,
+    /// Undo-store notices for the result (e.g. snapshot kept in memory only).
+    pub notices: Vec<String>,
 }
 
+/// What a `read` call produced.
 #[derive(Debug, Setters)]
 #[setters(into)]
 pub struct ReadOutput {
@@ -50,8 +53,25 @@ pub struct ReadOutput {
 
 #[derive(Debug)]
 pub enum Content {
+    /// Raw text of the requested window (no line numbers). Used by
+    /// non-tool callers such as the change detector.
     File(String),
+    /// An image (or a PDF passed through as an image).
     Image(Image),
+    /// Finished model-facing text: numbered lines or byte page plus footer,
+    /// a notebook view, extracted PDF text, a repeat-read stub, or an
+    /// informational note.
+    Rendered(RenderedRead),
+}
+
+/// Model-facing text of a read and the coverage it delivered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedRead {
+    /// Text to return to the model.
+    pub text: String,
+    /// The line window shown with line numbers, used to narrow coverage when
+    /// the result is clipped later.
+    pub numbered_window: Option<(u64, u64)>,
 }
 
 impl Content {
@@ -63,9 +83,15 @@ impl Content {
         Self::Image(image)
     }
 
+    /// Model-facing rendered text.
+    pub fn rendered(text: impl Into<String>, numbered_window: Option<(u64, u64)>) -> Self {
+        Self::Rendered(RenderedRead { text: text.into(), numbered_window })
+    }
+
     pub fn file_content(&self) -> &str {
         match self {
             Self::File(content) => content,
+            Self::Rendered(rendered) => &rendered.text,
             Self::Image(_) => "",
         }
     }
@@ -129,12 +155,29 @@ pub struct FsWriteOutput {
     pub before: Option<String>,
     pub errors: Vec<SyntaxError>,
     pub content_hash: String,
+    /// Bytes written.
+    pub bytes: usize,
+    /// Undo-store notices for the result.
+    pub notices: Vec<String>,
+}
+
+/// What `remove` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoveMode {
+    /// Moved to the trash with `trash`/`trash-put`.
+    Trashed,
+    /// Deleted permanently.
+    Deleted,
 }
 
 #[derive(Debug)]
 pub struct FsRemoveOutput {
-    // Content of the file
+    // Content of the file (empty for directories, symlinks and binary files)
     pub content: String,
+    /// How the path was removed.
+    pub mode: RemoveMode,
+    /// Undo-store notices for the result.
+    pub notices: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -144,10 +187,25 @@ pub struct PlanCreateOutput {
     pub before: Option<String>,
 }
 
-#[derive(Default, Debug, derive_more::From)]
+/// What `undo` did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UndoKind {
+    /// A regular file was restored.
+    File,
+    /// A directory tree was restored.
+    Directory,
+    /// A symlink was restored.
+    Symlink { target: String },
+    /// The path did not exist before the undone change; it was deleted.
+    Deletion,
+}
+
+#[derive(Debug)]
 pub struct FsUndoOutput {
     pub before_undo: Option<String>,
     pub after_undo: Option<String>,
+    /// The kind of state restored.
+    pub kind: UndoKind,
 }
 
 /// Output from todo_write tool execution
@@ -349,6 +407,21 @@ pub trait FsWriteService: Send + Sync {
         content: String,
         overwrite: bool,
     ) -> anyhow::Result<FsWriteOutput>;
+
+    /// The `write` tool: like [`FsWriteService::write`], plus the overwrite
+    /// gate (prior read, unchanged hash; a changed file is refused with a
+    /// diff), an undo snapshot taken before writing, and read-coverage
+    /// bookkeeping.
+    ///
+    /// # Errors
+    /// Returns the refusal or IO error the model should see.
+    async fn write_tool(
+        &self,
+        path: String,
+        content: String,
+        overwrite: bool,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<FsWriteOutput>;
 }
 
 #[async_trait::async_trait]
@@ -371,18 +444,39 @@ pub trait FsPatchService: Send + Sync {
     /// * `path` - Absolute path of the file.
     /// * `edits` - Replacements applied in order, each seeing the previous
     ///   result.
-    /// * `batch` - Whether the call used the `edits` form; errors then name
-    ///   the failing edit index.
+    /// * `batch` - Whether the call used the `edits` form; errors then name the
+    ///   failing edit index.
     ///
     /// # Errors
-    /// Returns an error when an edit does not match, matches ambiguously, or
-    /// the file cannot be read or written.
+    /// Returns an error when the read gate refuses, an edit does not match or
+    /// matches ambiguously, or the file cannot be read or written.
     async fn patch(
         &self,
         path: String,
         edits: Vec<forge_domain::PatchEdit>,
         batch: bool,
+        context: &forge_domain::ToolCallContext,
     ) -> anyhow::Result<PatchOutput>;
+}
+
+/// Arguments of a `read` tool call after path resolution.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Setters)]
+#[setters(strip_option, into)]
+pub struct ReadRequest {
+    /// Absolute path.
+    pub path: String,
+    /// First line (1-based) of a line range.
+    pub start_line: Option<u64>,
+    /// Last line (inclusive) of a line range.
+    pub end_line: Option<u64>,
+    /// First byte of a byte range.
+    pub start_byte: Option<u64>,
+    /// One past the last byte of a byte range.
+    pub end_byte: Option<u64>,
+    /// Whether lines are prefixed with their numbers.
+    pub show_line_numbers: bool,
+    /// Whether the model accepts image input.
+    pub vision: bool,
 }
 
 #[async_trait::async_trait]
@@ -394,6 +488,18 @@ pub trait FsReadService: Send + Sync {
         start_line: Option<u64>,
         end_line: Option<u64>,
     ) -> anyhow::Result<ReadOutput>;
+
+    /// The `read` tool: line or byte ranges, PDF text, notebook view, image
+    /// passthrough, whole-file size gate, continuation footers, coverage
+    /// recording and repeat-read stubs.
+    ///
+    /// # Errors
+    /// Returns the error the model should see.
+    async fn read_tool(
+        &self,
+        request: ReadRequest,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<ReadOutput>;
 }
 
 #[async_trait::async_trait]
@@ -404,8 +510,18 @@ pub trait ImageReadService: Send + Sync {
 
 #[async_trait::async_trait]
 pub trait FsRemoveService: Send + Sync {
-    /// Removes a file at the specified path.
-    async fn remove(&self, path: String) -> anyhow::Result<FsRemoveOutput>;
+    /// Removes a file, directory or symlink: to the trash by default, or
+    /// permanently. The path is snapshotted first so `undo` can restore it.
+    ///
+    /// # Errors
+    /// Returns an error when the path does not exist, the trash command is
+    /// missing or fails, or the target is too large to trash.
+    async fn remove(
+        &self,
+        path: String,
+        permanent: bool,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<FsRemoveOutput>;
 }
 
 #[async_trait::async_trait]
@@ -425,11 +541,17 @@ pub trait FsSearchService: Send + Sync {
 
 #[async_trait::async_trait]
 pub trait FsUndoService: Send + Sync {
-    /// Undoes the last file operation at the specified path.
-    /// And returns the content of the undone file.
-    // TODO: We should move Snapshot service to Services from infra
-    // and drop FsUndoService.
-    async fn undo(&self, path: String) -> anyhow::Result<FsUndoOutput>;
+    /// Restores the newest snapshot of `path` in this conversation.
+    ///
+    /// # Errors
+    /// Returns an error when there is no snapshot, the snapshot is unusable
+    /// (it is then discarded), or the filesystem refuses the restore (the
+    /// snapshot is kept for a retry).
+    async fn undo(
+        &self,
+        path: String,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<FsUndoOutput>;
 }
 
 #[async_trait::async_trait]
@@ -760,6 +882,18 @@ impl<I: Services> FsWriteService for I {
             .write(path, content, overwrite)
             .await
     }
+
+    async fn write_tool(
+        &self,
+        path: String,
+        content: String,
+        overwrite: bool,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<FsWriteOutput> {
+        self.fs_create_service()
+            .write_tool(path, content, overwrite, context)
+            .await
+    }
 }
 
 #[async_trait::async_trait]
@@ -783,8 +917,11 @@ impl<I: Services> FsPatchService for I {
         path: String,
         edits: Vec<forge_domain::PatchEdit>,
         batch: bool,
+        context: &forge_domain::ToolCallContext,
     ) -> anyhow::Result<PatchOutput> {
-        self.fs_patch_service().patch(path, edits, batch).await
+        self.fs_patch_service()
+            .patch(path, edits, batch, context)
+            .await
     }
 }
 
@@ -800,6 +937,14 @@ impl<I: Services> FsReadService for I {
             .read(path, start_line, end_line)
             .await
     }
+
+    async fn read_tool(
+        &self,
+        request: ReadRequest,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<ReadOutput> {
+        self.fs_read_service().read_tool(request, context).await
+    }
 }
 #[async_trait::async_trait]
 impl<I: Services> ImageReadService for I {
@@ -810,8 +955,15 @@ impl<I: Services> ImageReadService for I {
 
 #[async_trait::async_trait]
 impl<I: Services> FsRemoveService for I {
-    async fn remove(&self, path: String) -> anyhow::Result<FsRemoveOutput> {
-        self.fs_remove_service().remove(path).await
+    async fn remove(
+        &self,
+        path: String,
+        permanent: bool,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<FsRemoveOutput> {
+        self.fs_remove_service()
+            .remove(path, permanent, context)
+            .await
     }
 }
 
@@ -824,8 +976,12 @@ impl<I: Services> FsSearchService for I {
 
 #[async_trait::async_trait]
 impl<I: Services> FsUndoService for I {
-    async fn undo(&self, path: String) -> anyhow::Result<FsUndoOutput> {
-        self.fs_undo_service().undo(path).await
+    async fn undo(
+        &self,
+        path: String,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<FsUndoOutput> {
+        self.fs_undo_service().undo(path, context).await
     }
 }
 

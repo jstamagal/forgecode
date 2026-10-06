@@ -6,17 +6,31 @@ expression: tools
   "type": "object",
   "properties": {
     "file_path": {
-      "description": "Absolute path to the file to read.",
+      "description": "Path of the file to read.",
       "type": "string"
     },
     "range": {
-      "description": "Optional line range for partial reads.",
+      "description": "Optional line range (`start_line`/`end_line`) or byte range\n(`start_byte`/`end_byte`) for partial reads.",
       "type": "object",
       "properties": {
+        "end_byte": {
+          "description": "0-based offset one past the last byte to read (byte range).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "nullable": true
+        },
         "end_line": {
           "description": "Inclusive 1-based last line.",
           "type": "integer",
           "format": "int32",
+          "nullable": true
+        },
+        "start_byte": {
+          "description": "0-based byte offset of the first byte to read (byte range).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
           "nullable": true
         },
         "start_line": {
@@ -30,7 +44,7 @@ expression: tools
       "nullable": true
     },
     "show_line_numbers": {
-      "description": "If true, prefixes each line with its line index (starting at 1).\nDefaults to true.",
+      "description": "If true, prefixes each line with its line number. Defaults to true.",
       "type": "boolean",
       "default": true
     }
@@ -44,18 +58,19 @@ expression: tools
   "type": "object",
   "properties": {
     "content": {
-      "description": "The content to write to the file",
+      "description": "The complete file content to write.",
       "type": "string"
     },
     "file_path": {
-      "description": "The absolute path to the file to write (must be absolute, not relative)",
+      "description": "Path of the file to create or replace.",
       "type": "string"
     },
     "overwrite": {
-      "description": "If set to true, existing files will be overwritten. If not set and the\nfile exists, an error will be returned with the content of the\nexisting file.",
+      "description": "Required to replace an existing file; the file must have been read\nfirst and must not have changed since.",
       "type": "boolean"
     }
   },
+  "additionalProperties": false,
   "required": [
     "file_path",
     "content"
@@ -153,10 +168,15 @@ expression: tools
   "type": "object",
   "properties": {
     "path": {
-      "description": "The path of the file to remove (absolute path required)",
+      "description": "Path of the file, directory or symlink to remove.",
       "type": "string"
+    },
+    "permanent": {
+      "description": "Delete directly instead of moving to the trash (default false).",
+      "type": "boolean"
     }
   },
+  "additionalProperties": false,
   "required": [
     "path"
   ]
@@ -223,10 +243,11 @@ expression: tools
   "type": "object",
   "properties": {
     "path": {
-      "description": "The absolute path of the file to revert to its previous state.",
+      "description": "Path whose latest snapshot should be restored.",
       "type": "string"
     }
   },
+  "additionalProperties": false,
   "required": [
     "path"
   ]

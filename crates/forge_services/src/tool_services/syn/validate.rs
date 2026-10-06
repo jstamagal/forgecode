@@ -72,7 +72,10 @@ fn collect<D: Doc>(node: &Node<'_, D>, lines: &[&str], out: &mut Vec<ParseError>
             column: position.column(&node) + 1,
             kind,
             message,
-            line_text: lines.get(line).map(|l| l.trim().to_string()).unwrap_or_default(),
+            line_text: lines
+                .get(line)
+                .map(|l| l.trim().to_string())
+                .unwrap_or_default(),
         });
     }
 }
@@ -97,15 +100,15 @@ pub fn introduced_errors(path: &Path, before: Option<&str>, after: &str) -> Vec<
     }
     parse_errors(lang, after)
         .into_iter()
-        .filter(|error| {
-            match known.get_mut(&(error.kind.clone(), error.line_text.clone())) {
+        .filter(
+            |error| match known.get_mut(&(error.kind.clone(), error.line_text.clone())) {
                 Some(count) if *count > 0 => {
                     *count -= 1;
                     false
                 }
                 _ => true,
-            }
-        })
+            },
+        )
         .take(MAX_REPORTED)
         .map(|error| SyntaxError {
             line: error.line as u32,

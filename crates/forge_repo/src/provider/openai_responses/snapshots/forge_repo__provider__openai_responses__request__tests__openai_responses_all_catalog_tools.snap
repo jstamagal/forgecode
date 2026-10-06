@@ -10,7 +10,7 @@ expression: actual.tools
       "additionalProperties": false,
       "properties": {
         "file_path": {
-          "description": "Absolute path to the file to read.",
+          "description": "Path of the file to read.",
           "type": "string"
         },
         "range": {
@@ -18,6 +18,18 @@ expression: actual.tools
             {
               "additionalProperties": false,
               "properties": {
+                "end_byte": {
+                  "anyOf": [
+                    {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "0-based offset one past the last byte to read (byte range)."
+                },
                 "end_line": {
                   "anyOf": [
                     {
@@ -28,6 +40,18 @@ expression: actual.tools
                     }
                   ],
                   "description": "Inclusive 1-based last line."
+                },
+                "start_byte": {
+                  "anyOf": [
+                    {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "0-based byte offset of the first byte to read (byte range)."
                 },
                 "start_line": {
                   "anyOf": [
@@ -42,7 +66,9 @@ expression: actual.tools
                 }
               },
               "required": [
+                "end_byte",
                 "end_line",
+                "start_byte",
                 "start_line"
               ],
               "type": "object"
@@ -51,11 +77,11 @@ expression: actual.tools
               "type": "null"
             }
           ],
-          "description": "Optional line range for partial reads."
+          "description": "Optional line range (`start_line`/`end_line`) or byte range\n(`start_byte`/`end_byte`) for partial reads."
         },
         "show_line_numbers": {
           "default": true,
-          "description": "If true, prefixes each line with its line index (starting at 1).\nDefaults to true.",
+          "description": "If true, prefixes each line with its line number. Defaults to true.",
           "type": "boolean"
         }
       },
@@ -67,7 +93,7 @@ expression: actual.tools
       "type": "object"
     },
     "strict": true,
-    "description": "Reads a file from the local filesystem. You can access any file directly by using this tool. Assume this tool is able to read all files on the machine. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.\n\nUsage:\n- The file_path parameter must be an absolute path, not a relative path\n- By default, it reads up to {{config.maxReadSize}} lines starting from the beginning of the file\n- You can optionally specify a line start_line and end_line (especially handy for long files), but it's recommended to read the whole file by not providing these parameters\n- Any lines longer than {{config.maxLineLength}} characters will be truncated\n- Results are returned using rg \"\" -n format, with line numbers starting at 1\n{{#if (contains model.input_modalities \"image\")}}\n- This tool allows Forge Code to read images (eg PNG, JPG, etc). When reading an image file the contents are presented visually.\n- PDFs, Automatically encoded as base64 and sent as visual content for LLM to analyze pages. Any PDFs larger than {{config.maxImageSize}} bytes will return error\n{{/if}}\n- Jupyter notebooks (.ipynb files) are read as plain JSON text - you can parse the cell structure, outputs, and embedded content directly from the JSON\n- This tool can only read files, not directories. To read a directory, use an ls command via the `{{tool_names.shell}}` tool.\n- You can call multiple tools in a single response. It is always better to speculatively read multiple potentially useful files in parallel."
+    "description": "Read one file: text, PDF, image, or notebook. Relative paths resolve against the working directory.\n- Text comes back as `12:content`: line number, a colon, then the text. Lines are returned whole, however long they are. The prefix is not file content; strip it when you quote text back into an edit. `show_line_numbers: false` returns the text without prefixes.\n- A read stops after {{config.maxReadSize}} lines and ends with a footer naming the exact `range` that continues it. Use `range` with `start_line`/`end_line` for a slice of the file.\n- A whole-file read (no `range`) of a file larger than {{config.maxReadBytes}} bytes is refused with a suggested ranged call; ranged reads are not subject to that cap.\n- `range` also takes a byte range, `start_byte` (0-based) and optional `end_byte` (one past the last byte), for text with few or no line breaks: it returns raw text without line prefixes, one page at a time, snapped to UTF-8 character boundaries, and names the offset to continue from. Use it to page through a saved result file.\n- Pass either a line range or a byte range, never both.\n- Reading the same lines of an unchanged file again, while the earlier result is still in the conversation, returns a short note naming the read call that showed them.\n- A Jupyter notebook (.ipynb) read without a range comes back as its cells, each with its id, type, source and a summary of its outputs; a line or byte range reads its raw JSON.\n- A PDF comes back as extracted text (via `pdftotext`).\n{{#if (contains model.input_modalities \"image\")}}\n- Images (PNG, JPEG, GIF, WebP) come back as images; a PDF with no extractable text comes back as an image. Images and image-fallback PDFs larger than {{config.maxImageSize}} bytes are refused.\n{{/if}}\n- Directories, pipes and other special files are refused; use `{{tool_names.fs_search}}` to find files.\n- Reading records which lines you have seen: `{{tool_names.patch}}` and an overwriting `{{tool_names.write}}` require a prior read of the file, and `{{tool_names.patch}}` requires that every line it changes was shown.\n- You can call multiple tools in a single response; read several files in parallel when you need them."
   },
   {
     "type": "function",
@@ -76,15 +102,15 @@ expression: actual.tools
       "additionalProperties": false,
       "properties": {
         "content": {
-          "description": "The content to write to the file",
+          "description": "The complete file content to write.",
           "type": "string"
         },
         "file_path": {
-          "description": "The absolute path to the file to write (must be absolute, not relative)",
+          "description": "Path of the file to create or replace.",
           "type": "string"
         },
         "overwrite": {
-          "description": "If set to true, existing files will be overwritten. If not set and the\nfile exists, an error will be returned with the content of the\nexisting file.",
+          "description": "Required to replace an existing file; the file must have been read\nfirst and must not have changed since.",
           "type": "boolean"
         }
       },
@@ -96,7 +122,7 @@ expression: actual.tools
       "type": "object"
     },
     "strict": true,
-    "description": "Writes a file to the local filesystem.\n\nUsage:\n- This tool will overwrite the existing file if there is one at the provided path.\n- If this is an existing file, you MUST use the {{tool_names.read}} tool first to read the file's contents and use this tool with 'overwrite' as true . This tool will fail if you did not read the file first or don't set overwrite parameter to true.\n- ALWAYS prefer {{tool_names.patch}} on existing files in the codebase. NEVER write new files unless explicitly required.\n- NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.\n- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked."
+    "description": "Create a file, or replace one whole. Missing parent directories are created.\n- Replacing an existing file needs `overwrite=true` and a prior `{{tool_names.read}}` of the file in this conversation; one page is enough, the whole file is not needed. Without `overwrite=true` an existing file is refused.\n- If the file changed on disk since that read, the overwrite is refused and nothing is written; the error names both hashes and shows the diff from what you read to what is there now, and a retry after it goes through.\n- The file keeps its existing line-ending style (LF, CRLF or CR); a new file gets LF.\n- The previous state is snapshotted first, so `{{tool_names.undo}}` brings it back (undoing a create deletes the file).\n- After the write the file is parsed locally and syntax errors the write introduced are reported as a warning.\n- Edit existing files with `{{tool_names.patch}}`; use this only for new files or a deliberate full rewrite. Do not create documentation files unless asked."
   },
   {
     "type": "function",
@@ -278,17 +304,22 @@ expression: actual.tools
       "additionalProperties": false,
       "properties": {
         "path": {
-          "description": "The path of the file to remove (absolute path required)",
+          "description": "Path of the file, directory or symlink to remove.",
           "type": "string"
+        },
+        "permanent": {
+          "description": "Delete directly instead of moving to the trash (default false).",
+          "type": "boolean"
         }
       },
       "required": [
-        "path"
+        "path",
+        "permanent"
       ],
       "type": "object"
     },
     "strict": true,
-    "description": "Request to remove a file at the specified path. Use when you need to delete an existing file. The path must be absolute. This operation can be undone using the `{{tool_names.undo}}` tool."
+    "description": "Move a file, directory or symlink to the trash, or delete it with `permanent=true`. Either way the path is snapshotted first, so `{{tool_names.undo}}` can bring it back. Symlinks are removed as symlinks, never followed. The trash uses `trash` or `trash-put`; when neither is installed or the command fails, nothing is removed and `permanent=true` is the way to remove the path. Anything over 512 MiB is refused rather than trashed; confirm with the user before deleting that with `permanent=true`."
   },
   {
     "type": "function",
@@ -383,7 +414,7 @@ expression: actual.tools
       "additionalProperties": false,
       "properties": {
         "path": {
-          "description": "The absolute path of the file to revert to its previous state.",
+          "description": "Path whose latest snapshot should be restored.",
           "type": "string"
         }
       },
@@ -393,7 +424,7 @@ expression: actual.tools
       "type": "object"
     },
     "strict": true,
-    "description": "Reverts the most recent file operation (create/modify/delete) on a specific file. Use this tool when you need to recover from incorrect file changes or if a revert is requested by the user."
+    "description": "Restore one path to its latest snapshot. Every tool that changes a file (`{{tool_names.write}}`, `{{tool_names.patch}}`, `{{tool_names.remove}}`) snapshots it first; one `{{tool_names.patch}}` call, even with several edits, is one snapshot.\n- Restores file contents and permission modes, symlink targets, whole directory trees, and absence: undoing the creation of a file deletes it. Ownership, timestamps and extended attributes are not restored.\n- Each successful restore pops one snapshot, so repeated calls walk further back. A filesystem error keeps the snapshot for a retry. An unusable snapshot is discarded with an error without changing the path; call again to reach an older entry.\n- Snapshots belong to this conversation and survive a restart of it; the store keeps the newest 100 entries (64 MiB). This is not git and does not touch repository history."
   },
   {
     "type": "function",

@@ -17,9 +17,18 @@ use crate::truncation::{
 };
 use crate::utils::{compute_hash, format_display_path};
 use crate::{
-    FsRemoveOutput, FsUndoOutput, FsWriteOutput, HttpResponse, PatchOutput, PlanCreateOutput,
-    ReadOutput, ResponseContext, SearchResult, ShellOutput,
+    Content, FsRemoveOutput, FsUndoOutput, FsWriteOutput, HttpResponse, PatchOutput,
+    PlanCreateOutput, ReadOutput, RemoveMode, ResponseContext, SearchResult, ShellOutput, UndoKind,
 };
+
+/// `<warning>` elements for undo-store notices (e.g. a snapshot kept only in
+/// memory, or one that could not be captured).
+fn notice_elements(notices: &[String]) -> Vec<Element> {
+    notices
+        .iter()
+        .map(|notice| Element::new("warning").text(notice))
+        .collect()
+}
 
 #[derive(Debug, Default, Setters)]
 #[setters(into, strip_option)]
@@ -232,54 +241,31 @@ impl ToolOperation {
         let tool_name = tool_kind.name();
         match self {
             ToolOperation::FsRead { input, output } => {
-                // Check if content is an image (visual content)
-                if let Some(image) = output.content.as_image() {
-                    // Track read operations for visual content
-                    tracing::info!(
-                        path = %input.file_path,
-                        tool = %tool_name,
-                        "Visual content read (image/PDF)"
-                    );
+                // Track read operations (the external-change detector compares
+                // this hash with the file on disk between turns).
+                tracing::info!(path = %input.file_path, tool = %tool_name, "File read");
+                if !output.info.content_hash.is_empty() {
                     *metrics = metrics.clone().insert(
                         input.file_path.clone(),
                         FileOperation::new(tool_kind)
                             .content_hash(Some(output.info.content_hash.clone())),
                     );
-
-                    return forge_domain::ToolOutput::image(image.clone());
                 }
 
-                // Handle text content
-                let content = output.content.file_content();
-                let content = if input.show_line_numbers {
-                    content
-                        .to_numbered_from(output.info.start_line as usize)
-                        .to_string()
-                } else {
-                    content.to_string()
-                };
-                let elm = Element::new("file")
-                    .attr("path", &input.file_path)
-                    .attr(
-                        "display_lines",
-                        format!("{}-{}", output.info.start_line, output.info.end_line),
-                    )
-                    .attr("total_lines", output.info.total_lines)
-                    .cdata(content);
-
-                // Track read operations
-                tracing::info!(
-                    path = %input.file_path,
-                    tool = %tool_name,
-                    "File read"
-                );
-                *metrics = metrics.clone().insert(
-                    input.file_path.clone(),
-                    FileOperation::new(tool_kind)
-                        .content_hash(Some(output.info.content_hash.clone())),
-                );
-
-                forge_domain::ToolOutput::text(elm)
+                match output.content {
+                    Content::Image(image) => forge_domain::ToolOutput::image(image),
+                    Content::Rendered(rendered) => forge_domain::ToolOutput::text(rendered.text),
+                    Content::File(content) => {
+                        let content = if input.show_line_numbers {
+                            content
+                                .to_numbered_from(output.info.start_line as usize)
+                                .to_string()
+                        } else {
+                            content
+                        };
+                        forge_domain::ToolOutput::text(content)
+                    }
+                }
             }
             ToolOperation::FsWrite { input, output } => {
                 let diff_result = DiffFormat::format(
@@ -309,6 +295,7 @@ impl ToolOperation {
                 if !output.errors.is_empty() {
                     elm = elm.append(create_validation_warning(&input.file_path, &output.errors));
                 }
+                elm = elm.append(notice_elements(&output.notices));
 
                 forge_domain::ToolOutput::text(elm)
             }
@@ -324,9 +311,14 @@ impl ToolOperation {
                 );
 
                 let display_path = format_display_path(Path::new(&input.path), env.cwd.as_path());
+                let status = match output.mode {
+                    RemoveMode::Trashed => "trashed",
+                    RemoveMode::Deleted => "deleted",
+                };
                 let elem = Element::new("file_removed")
                     .attr("path", display_path)
-                    .attr("status", "completed");
+                    .attr("status", status)
+                    .append(notice_elements(&output.notices));
                 forge_domain::ToolOutput::text(elem)
             }
 
@@ -431,6 +423,7 @@ impl ToolOperation {
                 if !output.errors.is_empty() {
                     elm = elm.append(create_validation_warning(&input.file_path, &output.errors));
                 }
+                elm = elm.append(notice_elements(&output.notices));
 
                 *metrics = metrics.clone().insert(
                     input.file_path.clone(),
@@ -459,14 +452,33 @@ impl ToolOperation {
                         .content_hash(content_hash),
                 );
 
-                match (&output.before_undo, &output.after_undo) {
-                    (None, None) => {
+                match (&output.kind, &output.before_undo, &output.after_undo) {
+                    (UndoKind::Directory, _, _) => {
+                        let elm = Element::new("file_undo")
+                            .attr("path", input.path)
+                            .attr("status", "restored_directory");
+                        forge_domain::ToolOutput::text(elm)
+                    }
+                    (UndoKind::Symlink { target }, _, _) => {
+                        let elm = Element::new("file_undo")
+                            .attr("path", input.path)
+                            .attr("status", "restored_symlink")
+                            .attr("target", target);
+                        forge_domain::ToolOutput::text(elm)
+                    }
+                    (UndoKind::Deletion, _, _) => {
+                        let elm = Element::new("file_undo")
+                            .attr("path", input.path)
+                            .attr("status", "removed");
+                        forge_domain::ToolOutput::text(elm)
+                    }
+                    (UndoKind::File, None, None) => {
                         let elm = Element::new("file_undo")
                             .attr("path", input.path)
                             .attr("status", "no_changes");
                         forge_domain::ToolOutput::text(elm)
                     }
-                    (None, Some(after)) => {
+                    (UndoKind::File, None, Some(after)) => {
                         let elm = Element::new("file_undo")
                             .attr("path", input.path)
                             .attr("status", "created")
@@ -474,7 +486,7 @@ impl ToolOperation {
                             .cdata(after);
                         forge_domain::ToolOutput::text(elm)
                     }
-                    (Some(before), None) => {
+                    (UndoKind::File, Some(before), None) => {
                         let elm = Element::new("file_undo")
                             .attr("path", input.path)
                             .attr("status", "removed")
@@ -482,7 +494,7 @@ impl ToolOperation {
                             .cdata(before);
                         forge_domain::ToolOutput::text(elm)
                     }
-                    (Some(before), Some(after)) => {
+                    (UndoKind::File, Some(before), Some(after)) => {
                         // This diff is between modified state (before_undo) and
                         // snapshot state (after_undo)
                         let diff = DiffFormat::format(before, after);
@@ -690,7 +702,6 @@ mod tests {
             max_stdout_prefix_lines: 10,
             max_stdout_suffix_lines: 10,
             max_stdout_line_chars: 2000,
-            max_line_chars: 100,
             max_file_size_bytes: 256 << 10, // 256 KiB
             ..ForgeConfig::default()
         }
@@ -797,7 +808,11 @@ mod tests {
         let fixture = ToolOperation::FsRead {
             input: FSRead {
                 file_path: "/home/user/test.txt".to_string(),
-                range: Some(FSReadRange { start_line: Some(2), end_line: Some(3) }),
+                range: Some(FSReadRange {
+                    start_line: Some(2),
+                    end_line: Some(3),
+                    ..Default::default()
+                }),
                 show_line_numbers: true,
             },
             output: ReadOutput {
@@ -866,6 +881,8 @@ mod tests {
                 before: None,
                 errors: vec![],
                 content_hash: compute_hash(content),
+                bytes: 0,
+                notices: vec![],
             },
         };
 
@@ -897,6 +914,8 @@ mod tests {
                 before: Some("Old content".to_string()),
                 errors: vec![],
                 content_hash: compute_hash(content),
+                bytes: 0,
+                notices: vec![],
             },
         };
 
@@ -1404,6 +1423,8 @@ mod tests {
                 before: None,
                 errors: test_syntax_errors(vec![(10, 5, "Syntax error on line 10")]),
                 content_hash: compute_hash(content),
+                bytes: 0,
+                notices: vec![],
             },
         };
 
@@ -1438,6 +1459,8 @@ mod tests {
                     (20, 15, "Missing semicolon"),
                 ]),
                 content_hash: compute_hash(content),
+                bytes: 0,
+                notices: vec![],
             },
         };
 
@@ -1458,8 +1481,12 @@ mod tests {
     #[test]
     fn test_fs_remove_success() {
         let fixture = ToolOperation::FsRemove {
-            input: forge_domain::FSRemove { path: "/home/user/file_to_delete.txt".to_string() },
-            output: FsRemoveOutput { content: "content".to_string() },
+            input: forge_domain::FSRemove::new("/home/user/file_to_delete.txt".to_string()),
+            output: FsRemoveOutput {
+                content: "content".to_string(),
+                mode: crate::RemoveMode::Deleted,
+                notices: vec![],
+            },
         };
 
         let env = fixture_environment();
@@ -1968,6 +1995,7 @@ mod tests {
                 replacements: 1,
                 fuzzy_edits: 0,
                 batch: false,
+                notices: vec![],
             },
         };
 
@@ -1999,6 +2027,7 @@ mod tests {
                 replacements: 1,
                 fuzzy_edits: 0,
                 batch: false,
+                notices: vec![],
             },
         };
 
@@ -2038,6 +2067,7 @@ mod tests {
                 replacements: 1,
                 fuzzy_edits: 0,
                 batch: false,
+                notices: vec![],
             },
         };
 
@@ -2059,7 +2089,11 @@ mod tests {
     fn test_fs_undo_no_changes() {
         let fixture = ToolOperation::FsUndo {
             input: forge_domain::FSUndo { path: "/home/user/unchanged_file.txt".to_string() },
-            output: FsUndoOutput { before_undo: None, after_undo: None },
+            output: FsUndoOutput {
+                before_undo: None,
+                after_undo: None,
+                kind: crate::UndoKind::File,
+            },
         };
 
         let env = fixture_environment();
@@ -2083,6 +2117,7 @@ mod tests {
             output: FsUndoOutput {
                 before_undo: None,
                 after_undo: Some("New file content\nLine 2\nLine 3".to_string()),
+                kind: crate::UndoKind::File,
             },
         };
 
@@ -2109,6 +2144,7 @@ mod tests {
                     "Original file content\nThat was deleted\nDuring undo".to_string(),
                 ),
                 after_undo: None,
+                kind: crate::UndoKind::File,
             },
         };
 
@@ -2133,6 +2169,7 @@ mod tests {
             output: FsUndoOutput {
                 before_undo: Some("Original content\nBefore changes".to_string()),
                 after_undo: Some("Modified content\nAfter restoration".to_string()),
+                kind: crate::UndoKind::File,
             },
         };
 
@@ -2157,6 +2194,7 @@ mod tests {
             output: FsUndoOutput {
                 before_undo: Some("ABC".to_string()),
                 after_undo: Some("PQR".to_string()),
+                kind: crate::UndoKind::File,
             },
         };
 

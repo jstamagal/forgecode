@@ -33,7 +33,7 @@ use crate::{
 pub(crate) fn build_template_config(config: &ForgeConfig) -> forge_domain::TemplateConfig {
     forge_domain::TemplateConfig {
         max_read_size: config.max_read_lines as usize,
-        max_line_length: config.max_line_chars,
+        max_read_bytes: config.max_read_bytes as usize,
         max_image_size: config.max_image_size_bytes as usize,
         stdout_max_prefix_length: config.max_stdout_prefix_lines,
         stdout_max_suffix_length: config.max_stdout_suffix_lines,

@@ -25,8 +25,8 @@ use crate::policy::ForgePolicyService;
 use crate::provider_service::ForgeProviderService;
 use crate::template::ForgeTemplateService;
 use crate::tool_services::{
-    ForgeFetch, ForgeFsPatch, ForgeFsRead, ForgeFsRemove, ForgeFsSearch, ForgeFsUndo,
-    ForgeFsWrite, ForgeImageRead, ForgePlanCreate, ForgeShell, ForgeSkillFetch,
+    ForgeFetch, ForgeFsPatch, ForgeFsRead, ForgeFsRemove, ForgeFsSearch, ForgeFsUndo, ForgeFsWrite,
+    ForgeImageRead, ForgePlanCreate, ForgeShell, ForgeSkillFetch,
 };
 
 type McpService<F> = ForgeMcpService<ForgeMcpManager<F>, F, <F as McpServerInfra>::Client>;

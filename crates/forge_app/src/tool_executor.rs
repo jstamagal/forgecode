@@ -1,12 +1,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::anyhow;
 use forge_domain::{ToolCallContext, ToolCatalog, ToolOutput};
 
 use crate::fmt::content::FormatContent;
 use crate::operation::{TempContentFiles, ToolOperation};
-use crate::services::{Services, ShellService};
+use crate::services::{ReadRequest, Services, ShellService};
 use crate::{
     AgentRegistry, ConversationService, EnvironmentInfra, FsPatchService, FsReadService,
     FsRemoveService, FsSearchService, FsUndoService, FsWriteService, ImageReadService,
@@ -38,28 +37,6 @@ impl<
 {
     pub fn new(services: Arc<S>) -> Self {
         Self { services }
-    }
-
-    fn require_prior_read(
-        &self,
-        context: &ToolCallContext,
-        raw_path: &str,
-        action: &str,
-    ) -> anyhow::Result<()> {
-        let target_path = self.normalize_path(raw_path.to_string());
-        let has_read = context.with_metrics(|metrics| {
-            metrics.files_accessed.contains(&target_path)
-                || metrics.files_accessed.contains(raw_path)
-        })?;
-
-        if has_read {
-            Ok(())
-        } else {
-            Err(anyhow!(
-                "You must read the file with the read tool before attempting to {action}.",
-                action = action
-            ))
-        }
     }
 
     async fn dump_operation(&self, operation: &ToolOperation) -> anyhow::Result<TempContentFiles> {
@@ -153,22 +130,17 @@ impl<
         Ok(match input {
             ToolCatalog::Read(input) => {
                 let normalized_path = self.normalize_path(input.file_path.clone());
-                let output = self
-                    .services
-                    .read(
-                        normalized_path,
-                        input
-                            .range
-                            .as_ref()
-                            .and_then(|r| r.start_line)
-                            .map(|i| i as u64),
-                        input
-                            .range
-                            .as_ref()
-                            .and_then(|r| r.end_line)
-                            .map(|i| i as u64),
-                    )
-                    .await?;
+                let range = input.range.clone().unwrap_or_default();
+                let request = ReadRequest {
+                    path: normalized_path,
+                    start_line: range.start_line.map(|line| line.max(1) as u64),
+                    end_line: range.end_line.map(|line| line.max(1) as u64),
+                    start_byte: range.start_byte,
+                    end_byte: range.end_byte,
+                    show_line_numbers: input.show_line_numbers,
+                    vision: context.vision(),
+                };
+                let output = self.services.read_tool(request, context).await?;
 
                 (input, output).into()
             }
@@ -176,7 +148,12 @@ impl<
                 let normalized_path = self.normalize_path(input.file_path.clone());
                 let output = self
                     .services
-                    .write(normalized_path, input.content.clone(), input.overwrite)
+                    .write_tool(
+                        normalized_path,
+                        input.content.clone(),
+                        input.overwrite,
+                        context,
+                    )
                     .await?;
                 (input, output).into()
             }
@@ -191,7 +168,10 @@ impl<
             }
             ToolCatalog::Remove(input) => {
                 let normalized_path = self.normalize_path(input.path.clone());
-                let output = self.services.remove(normalized_path).await?;
+                let output = self
+                    .services
+                    .remove(normalized_path, input.permanent, context)
+                    .await?;
                 (input, output).into()
             }
             ToolCatalog::Patch(input) => {
@@ -199,13 +179,13 @@ impl<
                 let edits = input.resolve_edits()?;
                 let output = self
                     .services
-                    .patch(normalized_path, edits, input.is_batch())
+                    .patch(normalized_path, edits, input.is_batch(), context)
                     .await?;
                 (input, output).into()
             }
             ToolCatalog::Undo(input) => {
                 let normalized_path = self.normalize_path(input.path.clone());
-                let output = self.services.undo(normalized_path).await?;
+                let output = self.services.undo(normalized_path, context).await?;
                 (input, output).into()
             }
             ToolCatalog::Shell(input) => {
@@ -271,23 +251,6 @@ impl<
         let tool_kind = tool_input.kind();
         let env = self.services.get_environment();
         let config = self.services.get_config()?;
-
-        // Enforce read-before-edit for patch operations
-        let file_path = match &tool_input {
-            ToolCatalog::Patch(input) => Some(&input.file_path),
-            _ => None,
-        };
-
-        if let Some(path) = file_path {
-            self.require_prior_read(context, path, "edit it")?;
-        }
-
-        // Enforce read-before-edit for overwrite writes
-        if let ToolCatalog::Write(input) = &tool_input
-            && input.overwrite
-        {
-            self.require_prior_read(context, &input.file_path, "overwrite it")?;
-        }
 
         let execution_result = self.call_internal(tool_input.clone(), context).await;
 

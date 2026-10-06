@@ -6,32 +6,59 @@ use url::Url;
 use crate::{
     AnyProvider, AuthCredential, ChatCompletionMessage, Context, Conversation, ConversationId,
     MigrationResult, Model, ModelId, Provider, ProviderId, ProviderTemplate, ResultStream, Skill,
-    Snapshot, WorkspaceAuth, WorkspaceId,
+    SnapshotCoverage, UndoOutcome, WorkspaceAuth, WorkspaceId,
 };
 
-/// Repository for managing file snapshots
+/// Repository for the persistent undo store.
 ///
-/// This repository provides operations for creating and restoring file
-/// snapshots, enabling undo functionality for file modifications.
+/// Snapshots are kept per conversation (each conversation has its own undo
+/// stacks) and survive a restart of that conversation.
 #[async_trait::async_trait]
 pub trait SnapshotRepository: Send + Sync {
-    /// Inserts a new snapshot for the given file path
+    /// Captures the current state of `path` (file, directory, symlink or
+    /// absence) as the newest undo entry of the conversation.
     ///
     /// # Arguments
-    /// * `file_path` - Path to the file to snapshot
+    /// * `conversation` - Conversation that owns the undo stack.
+    /// * `path` - Absolute path about to be mutated.
+    /// * `coverage` - Read coverage to restore with a file snapshot.
+    ///
+    /// # Returns
+    /// Notices for the tool result (e.g. the entry is kept in memory only).
     ///
     /// # Errors
-    /// Returns an error if the snapshot creation fails
-    async fn insert_snapshot(&self, file_path: &Path) -> Result<Snapshot>;
+    /// Returns an error if the store cannot be opened.
+    async fn insert_snapshot(
+        &self,
+        conversation: &ConversationId,
+        path: &Path,
+        coverage: Option<SnapshotCoverage>,
+    ) -> Result<Vec<String>>;
 
-    /// Restores the most recent snapshot for the given file path
-    ///
-    /// # Arguments
-    /// * `file_path` - Path to the file to restore
+    /// Drops the newest undo entry of `path` without restoring it, e.g. when
+    /// the mutation it guarded failed.
     ///
     /// # Errors
-    /// Returns an error if no snapshot exists or restoration fails
-    async fn undo_snapshot(&self, file_path: &Path) -> Result<()>;
+    /// Returns an error if the store cannot be opened.
+    async fn discard_snapshot(&self, conversation: &ConversationId, path: &Path) -> Result<()>;
+
+    /// Restores the newest undo entry of `path`. The entry is removed only
+    /// when the restore succeeds; an unusable entry is discarded and reported.
+    ///
+    /// # Errors
+    /// Returns an error if the filesystem refuses the restore; the entry is
+    /// kept so the undo can be retried.
+    async fn undo_snapshot(
+        &self,
+        conversation: &ConversationId,
+        path: &Path,
+    ) -> Result<UndoOutcome>;
+
+    /// Whether `path` has an undo entry in the conversation.
+    ///
+    /// # Errors
+    /// Returns an error if the store cannot be opened.
+    async fn has_snapshot(&self, conversation: &ConversationId, path: &Path) -> Result<bool>;
 }
 
 /// Repository for managing conversation persistence

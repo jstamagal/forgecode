@@ -185,7 +185,8 @@ impl Todo {
     }
 }
 
-/// Optional line range for partial file reads.
+/// Optional range for partial file reads: a line range or a byte range, not
+/// both.
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[schemars(deny_unknown_fields)]
 pub struct FSReadRange {
@@ -196,39 +197,59 @@ pub struct FSReadRange {
     /// Inclusive 1-based last line.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_line: Option<i32>,
+
+    /// 0-based byte offset of the first byte to read (byte range).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_byte: Option<u64>,
+
+    /// 0-based offset one past the last byte to read (byte range).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_byte: Option<u64>,
+}
+
+impl FSReadRange {
+    /// Whether a line bound is given.
+    pub fn is_line_range(&self) -> bool {
+        self.start_line.is_some() || self.end_line.is_some()
+    }
+
+    /// Whether a byte bound is given.
+    pub fn is_byte_range(&self) -> bool {
+        self.start_byte.is_some() || self.end_byte.is_some()
+    }
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
 #[tool_description_file = "crates/forge_domain/src/tools/descriptions/fs_read.md"]
 #[schemars(deny_unknown_fields)]
 pub struct FSRead {
-    /// Absolute path to the file to read.
+    /// Path of the file to read.
     #[serde(alias = "path")]
     pub file_path: String,
 
-    /// Optional line range for partial reads.
+    /// Optional line range (`start_line`/`end_line`) or byte range
+    /// (`start_byte`/`end_byte`) for partial reads.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range: Option<FSReadRange>,
 
-    /// If true, prefixes each line with its line index (starting at 1).
-    /// Defaults to true.
+    /// If true, prefixes each line with its line number. Defaults to true.
     #[serde(default = "default_true")]
     pub show_line_numbers: bool,
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
 #[tool_description_file = "crates/forge_domain/src/tools/descriptions/fs_write.md"]
+#[schemars(deny_unknown_fields)]
 pub struct FSWrite {
-    /// The absolute path to the file to write (must be absolute, not relative)
+    /// Path of the file to create or replace.
     #[serde(alias = "path")]
     pub file_path: String,
 
-    /// The content to write to the file
+    /// The complete file content to write.
     pub content: String,
 
-    /// If set to true, existing files will be overwritten. If not set and the
-    /// file exists, an error will be returned with the content of the
-    /// existing file.
+    /// Required to replace an existing file; the file must have been read
+    /// first and must not have changed since.
     #[serde(default)]
     #[serde(skip_serializing_if = "is_default")]
     pub overwrite: bool,
@@ -318,9 +339,21 @@ pub enum OutputMode {
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
 #[tool_description_file = "crates/forge_domain/src/tools/descriptions/fs_remove.md"]
+#[schemars(deny_unknown_fields)]
 pub struct FSRemove {
-    /// The path of the file to remove (absolute path required)
+    /// Path of the file, directory or symlink to remove.
     pub path: String,
+
+    /// Delete directly instead of moving to the trash (default false).
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub permanent: bool,
+}
+
+impl FSRemove {
+    /// Creates a trash-mode remove input for `path`.
+    pub fn new(path: impl Into<String>) -> Self {
+        Self { path: path.into(), permanent: false }
+    }
 }
 
 /// Helper trait to generate simple string enum schemas for unit enums.
@@ -454,7 +487,9 @@ impl FSPatch {
                 )
             }
             Some(edits) if edits.is_empty() => {
-                anyhow::bail!("edits must be a non-empty list of {{old_string, new_string}} objects")
+                anyhow::bail!(
+                    "edits must be a non-empty list of {{old_string, new_string}} objects"
+                )
             }
             Some(edits) => Ok(edits.clone()),
             None => match (&self.old_string, &self.new_string) {
@@ -516,8 +551,9 @@ impl PatchEdit {
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
 #[tool_description_file = "crates/forge_domain/src/tools/descriptions/fs_undo.md"]
+#[schemars(deny_unknown_fields)]
 pub struct FSUndo {
-    /// The absolute path of the file to revert to its previous state.
+    /// Path whose latest snapshot should be restored.
     pub path: String,
 }
 
@@ -935,7 +971,7 @@ impl ToolCatalog {
 
     /// Creates a Remove tool call with the specified path
     pub fn tool_call_remove(path: &str) -> ToolCallFull {
-        ToolCallFull::from(ToolCatalog::Remove(FSRemove { path: path.to_string() }))
+        ToolCallFull::from(ToolCatalog::Remove(FSRemove::new(path)))
     }
 
     /// Creates a Shell tool call with the specified command and working
@@ -1536,7 +1572,8 @@ mod tests {
         let mut fixture = crate::FSPatch::new("/a.rs", "x", "y");
         fixture.edits = Some(vec![crate::PatchEdit::new("a", "b")]);
         let actual = fixture.resolve_edits().unwrap_err().to_string();
-        let expected = "pass either the scalar form (old_string/new_string/replace_all) or edits, not both";
+        let expected =
+            "pass either the scalar form (old_string/new_string/replace_all) or edits, not both";
         assert_eq!(actual, expected);
     }
 

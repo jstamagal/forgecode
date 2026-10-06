@@ -30,9 +30,24 @@ pub fn derive_description(input: TokenStream) -> TokenStream {
         }
     }
 
-    // If we have a description file, read it at compile time
+    // If we have a description file, read it at compile time. The generated
+    // code also `include_str!`s the file (unused value) so Cargo tracks it as
+    // an input and rebuilds when the description changes.
+    let mut tracked_file = None;
     let doc_string = if let Some(file_path) = description_file {
-        std::fs::read_to_string(&file_path)
+        let absolute = std::env::var("CARGO_MANIFEST_DIR")
+            .ok()
+            .and_then(|dir| {
+                let manifest = std::path::Path::new(&dir);
+                // Description paths are relative to the workspace root.
+                manifest
+                    .ancestors()
+                    .map(|root| root.join(&file_path))
+                    .find(|candidate| candidate.is_file())
+            })
+            .unwrap_or_else(|| std::path::PathBuf::from(&file_path));
+        tracked_file = Some(absolute.display().to_string());
+        std::fs::read_to_string(&absolute)
             .unwrap_or_else(|e| {
                 panic!(
                     "Failed to read tool description file '{}': {}",
@@ -63,8 +78,12 @@ pub fn derive_description(input: TokenStream) -> TokenStream {
     };
 
     // Generate the implementation
+    let track = tracked_file
+        .map(|file| quote! { const _: &str = include_str!(#file); })
+        .unwrap_or_default();
     let expanded = if generics.params.is_empty() {
         quote! {
+            #track
             impl ToolDescription for #name {
                 fn description(&self) -> String {
                     #doc_string.into()
@@ -73,6 +92,7 @@ pub fn derive_description(input: TokenStream) -> TokenStream {
         }
     } else {
         quote! {
+            #track
             impl #generics ToolDescription for #name #generics {
                 fn description(&self) -> String {
                     #doc_string.into()

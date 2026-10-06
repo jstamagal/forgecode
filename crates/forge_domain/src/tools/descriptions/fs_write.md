@@ -1,8 +1,7 @@
-Writes a file to the local filesystem.
-
-Usage:
-- This tool will overwrite the existing file if there is one at the provided path.
-- If this is an existing file, you MUST use the {{tool_names.read}} tool first to read the file's contents and use this tool with 'overwrite' as true . This tool will fail if you did not read the file first or don't set overwrite parameter to true.
-- ALWAYS prefer {{tool_names.patch}} on existing files in the codebase. NEVER write new files unless explicitly required.
-- NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.
-- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.
+Create a file, or replace one whole. Missing parent directories are created.
+- Replacing an existing file needs `overwrite=true` and a prior `{{tool_names.read}}` of the file in this conversation; one page is enough, the whole file is not needed. Without `overwrite=true` an existing file is refused.
+- If the file changed on disk since that read, the overwrite is refused and nothing is written; the error names both hashes and shows the diff from what you read to what is there now, and a retry after it goes through.
+- The file keeps its existing line-ending style (LF, CRLF or CR); a new file gets LF.
+- The previous state is snapshotted first, so `{{tool_names.undo}}` brings it back (undoing a create deletes the file).
+- After the write the file is parsed locally and syntax errors the write introduced are reported as a warning.
+- Edit existing files with `{{tool_names.patch}}`; use this only for new files or a deliberate full rewrite. Do not create documentation files unless asked.

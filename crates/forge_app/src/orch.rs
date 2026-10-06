@@ -268,13 +268,18 @@ impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orc
 
         // Retrieve the number of requests allowed per tick.
         let max_requests_per_turn = self.agent.max_requests_per_turn;
-        let tool_context =
-            ToolCallContext::new(self.conversation.metrics.clone()).sender(self.sender.clone());
+        let tool_context = ToolCallContext::new(self.conversation.metrics.clone())
+            .sender(self.sender.clone())
+            .with_conversation_id(self.conversation.id);
 
         while !should_yield {
             // Set context for the current loop iteration
             self.conversation.context = Some(context.clone());
             self.services.update(self.conversation.clone()).await?;
+
+            // A shown read whose result was compacted away no longer backs a
+            // repeat-read stub.
+            crate::read_tracking::keep_shown_in_context(&tool_context, &context)?;
 
             let request_event = LifecycleEvent::Request(EventData::new(
                 self.agent.clone(),
@@ -337,6 +342,11 @@ impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orc
             let mut tool_call_records = self
                 .execute_tool_calls(&message.tool_calls, &tool_context)
                 .await?;
+
+            // Reads delivered in this batch become "shown"; a later exact
+            // repeat is answered with a stub while the result stays in the
+            // conversation.
+            crate::read_tracking::settle_batch(&tool_context, &tool_call_records)?;
 
             // Update context from conversation after response / tool-call hooks
             // run
