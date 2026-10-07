@@ -78,6 +78,7 @@ impl KernelProcess {
     ) -> anyhow::Result<Self> {
         // Under a jail the socket directory and the image directory live in
         // the jail's private directory, which shows at the same path inside.
+        // Images sit outside the socket directory so a restart keeps them.
         let jail = forge_domain::active_jail();
         let dir = match jail {
             Some(jail) => tempfile::tempdir_in(&jail.private),
@@ -85,7 +86,7 @@ impl KernelProcess {
         }
         .context("could not create the kernel's socket directory")?;
         let image_dir = match jail {
-            Some(_) => dir.path().join("images"),
+            Some(jail) => jail.private.join("kernel-images"),
             None => image_dir.to_path_buf(),
         };
         let driver = dir.path().join("forge_kernel_driver.py");

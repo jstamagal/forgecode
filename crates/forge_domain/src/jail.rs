@@ -456,4 +456,28 @@ mod tests {
         );
         assert_eq!(&argv[argv.len() - 4..], &["--", "sh", "-c", "true"]);
     }
+
+    #[test]
+    fn test_wrap_runs_bwrap_and_binds_the_private_dir_at_its_own_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let jail = fixture(&root, &dir.path().join("home"));
+
+        let argv = jail.wrap(&["true".to_string()], &root);
+
+        let private = jail.private.display().to_string();
+        let actual = (
+            argv.first().cloned(),
+            argv.windows(3)
+                .any(|w| w == ["--bind", private.as_str(), private.as_str()]),
+            argv.last().cloned(),
+        );
+        let expected = (
+            Some("/usr/bin/bwrap".to_string()),
+            true,
+            Some("true".to_string()),
+        );
+        assert_eq!(actual, expected);
+    }
 }
