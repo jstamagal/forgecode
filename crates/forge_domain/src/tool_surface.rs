@@ -344,6 +344,13 @@ impl CatalogEntry {
             loadable: true,
         }
     }
+
+    /// Whether this row passes a `tool_discovery` `source` filter: its own
+    /// source (any case), or `mcp` for every MCP row.
+    pub fn matches_source(&self, source: &str) -> bool {
+        self.source.eq_ignore_ascii_case(source)
+            || (self.kind == EntryKind::Mcp && source.eq_ignore_ascii_case("mcp"))
+    }
 }
 
 /// The first sentence-ish of a description, collapsed to one line.
@@ -731,6 +738,18 @@ impl SharedSurface {
         })
     }
 
+    /// The catalog id a `tool_discovery` `load` names: the id itself, or the
+    /// id of the lazy tool with that bare name.
+    pub fn load_id(&self, load: &str) -> String {
+        self.with(|data| {
+            data.tools
+                .iter()
+                .find(|t| t.mode == ToolMode::Lazy && t.definition.name.as_str() == load)
+                .map(SurfaceTool::catalog_id)
+        })
+        .unwrap_or_else(|| load.to_string())
+    }
+
     /// Why `name` is not callable on this request.
     pub fn absent(&self, name: &ToolName, state: &SurfaceState) -> crate::Absent {
         if let Some(id) = self.loadable_id(name.as_str(), state) {
@@ -977,5 +996,44 @@ mod tests {
             surface.loadable_id("lsp", &SurfaceState::default()),
             Some("native:lsp".to_string())
         );
+    }
+
+    #[test]
+    fn test_load_id_resolves_a_lazy_tool_name() {
+        let tool = |name: &str, mode| SurfaceTool {
+            definition: ToolDefinition::new(name),
+            mode,
+            source: ToolSource::Native,
+        };
+        let fixture = SharedSurface::new(SurfaceData {
+            tools: vec![tool("lsp", ToolMode::Lazy), tool("read", ToolMode::Eager)],
+            ..Default::default()
+        });
+
+        let actual =
+            ["lsp", "native:lsp", "read", "skill:review"].map(|load| fixture.load_id(load));
+
+        let expected = ["native:lsp", "native:lsp", "read", "skill:review"].map(String::from);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_source_mcp_matches_every_mcp_row_and_a_server_name_in_any_case() {
+        let fixture = CatalogEntry::for_tool(
+            &ToolDefinition::new("github__list_issues"),
+            &ToolSource::Mcp("github".to_string()),
+        );
+        let native = entry("native:lsp", "lsp", "Language server.");
+
+        let actual = [
+            fixture.matches_source("mcp"),
+            fixture.matches_source("GitHub"),
+            fixture.matches_source("native"),
+            native.matches_source("mcp"),
+            native.matches_source("native"),
+        ];
+
+        let expected = [true, true, false, false, true];
+        assert_eq!(actual, expected);
     }
 }

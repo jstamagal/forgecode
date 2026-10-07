@@ -579,7 +579,7 @@ expression: tools
       "nullable": true
     },
     "load": {
-      "description": "Catalog id to load, such as `native:lsp`, `mcp:github__list_issues`\nor `skill:review`.",
+      "description": "Catalog id to load, such as `native:lsp`, `mcp:github__list_issues`\nor `skill:review`; a tool's bare name also works.",
       "type": "string",
       "nullable": true
     },
@@ -595,7 +595,7 @@ expression: tools
       "type": "string"
     },
     "source": {
-      "description": "Only rows with exactly this source (an MCP server name, `native`, or\na skill source).",
+      "description": "Only rows with this source: an MCP server name, `native`, `skill`, or\n`mcp` for every MCP server.",
       "type": "string",
       "nullable": true
     }

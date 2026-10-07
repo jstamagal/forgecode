@@ -378,24 +378,32 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ToolReg
         let surface = context.surface().clone();
         let state = context.surface_state()?;
 
-        if let Some(id) = input
+        if let Some(load) = input
             .load
             .as_deref()
             .map(str::trim)
             .filter(|id| !id.is_empty())
         {
-            return self.load_catalog_id(id, &surface, &state).await;
+            let id = surface.load_id(load);
+            return self.load_catalog_id(&id, &surface, &state).await;
         }
 
-        // A search scoped to MCP (kind or a server name as source) connects
-        // the agent's servers first, so their tools become catalog rows.
+        // A search scoped to MCP (kind, `mcp` as source, or a server name as
+        // source) connects the agent's servers first, so their tools become
+        // catalog rows. `mcp` scopes to every server.
+        let source = input.source.as_deref();
+        let server = source.filter(|s| !s.eq_ignore_ascii_case("mcp"));
         let wants_mcp = matches!(input.kind, Some(DiscoveryKind::Mcp))
-            || input.source.as_deref().is_some_and(|source| {
-                surface.with(|d| d.status_rows.iter().any(|r| r.source == source))
+            || source.is_some_and(|s| s.eq_ignore_ascii_case("mcp"))
+            || server.is_some_and(|server| {
+                surface.with(|d| {
+                    d.status_rows
+                        .iter()
+                        .any(|r| r.source.eq_ignore_ascii_case(server))
+                })
             });
         if wants_mcp {
-            self.connect_mcp_into_surface(agent, &surface, input.source.as_deref())
-                .await;
+            self.connect_mcp_into_surface(agent, &surface, server).await;
         }
 
         let kind = input.kind.map(|kind| match kind {
@@ -407,12 +415,7 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ToolReg
             .catalog()
             .into_iter()
             .filter(|row| kind.is_none_or(|k| row.kind == k))
-            .filter(|row| {
-                input
-                    .source
-                    .as_deref()
-                    .is_none_or(|source| row.source.eq_ignore_ascii_case(source))
-            })
+            .filter(|row| source.is_none_or(|source| row.matches_source(source)))
             .collect();
         let page = catalog_page(
             &rows,

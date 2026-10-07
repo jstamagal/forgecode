@@ -167,7 +167,7 @@ pub struct ToolDiscovery {
     pub query: String,
 
     /// Catalog id to load, such as `native:lsp`, `mcp:github__list_issues`
-    /// or `skill:review`.
+    /// or `skill:review`; a tool's bare name also works.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load: Option<String>,
 
@@ -175,8 +175,8 @@ pub struct ToolDiscovery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<DiscoveryKind>,
 
-    /// Only rows with exactly this source (an MCP server name, `native`, or
-    /// a skill source).
+    /// Only rows with this source: an MCP server name, `native`, `skill`, or
+    /// `mcp` for every MCP server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
 
