@@ -5,6 +5,7 @@ expression: to_value(actual)
 <file_diff
   path="/home/user/test.zsh"
   total_lines="3"
+  summary="1 replacement"
 ><![CDATA[1 1 | line1
   2 |+new line
 2 3 | line2
@@ -15,7 +16,7 @@ expression: to_value(actual)
   path="/home/user/test.zsh"
 >
 </file>
-<details>The file was written successfully but contains 3 syntax error(s)</details>
+<details>The file was written successfully but the edit introduced 3 syntax error(s)</details>
 <error
   line="22"
   column="1"

@@ -99,6 +99,7 @@ mod tests {
                     ToolValue::Empty,
                 ],
                 is_error: false,
+                uncounted: false,
             },
         }])
     }
@@ -177,6 +178,7 @@ mod tests {
                     ToolValue::Text("After images".to_string()),
                 ],
                 is_error: false,
+                uncounted: false,
             },
         }]);
 
@@ -200,6 +202,7 @@ mod tests {
                     ToolValue::Image(image),
                 ],
                 is_error: true,
+                uncounted: false,
             },
         }]);
 

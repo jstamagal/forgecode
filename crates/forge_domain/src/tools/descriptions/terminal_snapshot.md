@@ -1,0 +1,1 @@
+Render the current screen of a terminal session as a PNG, for judging layout, borders, colours, cursor placement, wrapping or clipping that text cannot show. The session must already be started. The result is the image when the model accepts images, and always names the file it was written to.

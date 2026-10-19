@@ -62,7 +62,10 @@ impl<I> ForgeSkillRepository<I> {
 
         builtin_skills
             .into_iter()
-            .filter_map(|(path, content)| extract_skill(path, content))
+            .filter_map(|(path, content)| {
+                let dir = path.rsplit('/').nth(1).unwrap_or(path);
+                extract_skill(path, content, dir)
+            })
             .collect()
     }
 }
@@ -191,7 +194,7 @@ impl<I: FileInfoInfra + EnvironmentInfra + FileReaderInfra + WalkerInfra> ForgeS
                             // Try to extract skill from front matter, otherwise
                             // create with directory
                             // name
-                            if let Some(skill) = extract_skill(&path_str, &content) {
+                            if let Some(skill) = extract_skill(&path_str, &content, &skill_name) {
                                 Ok(Some(skill.resources(resources)))
                             } else {
                                 // Fallback: create skill with directory name if
@@ -255,11 +258,21 @@ impl<I: FileInfoInfra + EnvironmentInfra + FileReaderInfra + WalkerInfra> ForgeS
 
 /// Private type for parsing skill YAML front matter
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 struct SkillMetadata {
-    /// Optional name of the skill (overrides filename if present)
+    /// Optional name of the skill (defaults to the skill's directory name)
     name: Option<String>,
-    /// Optional description of the skill
+    /// Description of the skill (required)
     description: Option<String>,
+    /// User-only skill, hidden from the model
+    #[serde(default)]
+    disable_model_invocation: bool,
+    /// Tools the skill activates
+    #[serde(default)]
+    tools: Vec<String>,
+    /// Path globs that trigger a one-time offer of the skill
+    #[serde(default)]
+    paths: Vec<String>,
 }
 
 /// Extracts metadata from the skill markdown content using YAML front matter
@@ -270,20 +283,27 @@ struct SkillMetadata {
 /// ---
 /// name: "skill-name"
 /// description: "Your description here"
+/// disable-model-invocation: false
+/// tools: [lsp]
+/// paths: ["**/*.proto"]
 /// ---
 /// # Skill content...
 /// ```
 ///
-/// Returns a tuple of (name, description) where both are Option<String>.
-fn extract_skill(path: &str, content: &str) -> Option<Skill> {
+/// `description` is required; `name` defaults to `dir_name`.
+fn extract_skill(path: &str, content: &str, dir_name: &str) -> Option<Skill> {
     let matter = Matter::<YAML>::new();
     let result = matter.parse::<SkillMetadata>(content);
     result.ok().and_then(|parsed| {
         let command = parsed.content;
-        parsed
-            .data
-            .and_then(|data| data.name.zip(data.description))
-            .map(|(name, description)| Skill::new(name, command, description).path(path))
+        let data = parsed.data?;
+        let description = data.description?;
+        let name = data.name.unwrap_or_else(|| dir_name.to_string());
+        let mut skill = Skill::new(name, command, description).path(path);
+        skill.disable_model_invocation = data.disable_model_invocation;
+        skill.tools = data.tools;
+        skill.paths = data.paths;
+        Some(skill)
     })
 }
 
@@ -463,7 +483,7 @@ mod tests {
             forge_test_kit::fixture!("/src/fixtures/skills/with_name_and_description.md").await;
 
         // Act
-        let actual = extract_skill(path, &content);
+        let actual = extract_skill(path, &content, "with_name_and_description");
 
         // Assert
         let expected = Some(
@@ -483,10 +503,46 @@ mod tests {
         let content = forge_test_kit::fixture!("/src/fixtures/skills/with_name_only.md").await;
 
         // Act
-        let actual = extract_skill("test.md", &content);
+        let actual = extract_skill("test.md", &content, "test");
 
         // Assert - Returns None because metadata is incomplete
         assert_eq!(actual, None);
+    }
+
+    #[tokio::test]
+    async fn test_extract_skill_name_defaults_to_directory() {
+        let content =
+            forge_test_kit::fixture!("/src/fixtures/skills/with_description_only.md").await;
+
+        let actual = extract_skill("skills/lint/SKILL.md", &content, "lint");
+
+        let expected = Some(
+            Skill::new("lint", "# Skill Content", "Just a description")
+                .path("skills/lint/SKILL.md"),
+        );
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_extract_skill_reads_tools_paths_and_user_only_flag() {
+        let content = "---\ndescription: Proto rules\ndisable-model-invocation: true\ntools: [lsp, ast_search]\npaths: [\"**/*.proto\"]\n---\nbody";
+
+        let actual = extract_skill("p/SKILL.md", content, "proto").unwrap();
+
+        assert_eq!(
+            (
+                actual.name.as_str(),
+                actual.disable_model_invocation,
+                actual.tools.clone()
+            ),
+            (
+                "proto",
+                true,
+                vec!["lsp".to_string(), "ast_search".to_string()]
+            )
+        );
+        assert!(actual.matches_path("api/v1/user.proto"));
+        assert!(!actual.matches_path("api/v1/user.rs"));
     }
 
     #[tokio::test]

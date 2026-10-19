@@ -5,39 +5,60 @@ use url::Url;
 
 use crate::{
     AnyProvider, AuthCredential, ChatCompletionMessage, Context, Conversation, ConversationId,
-    MigrationResult, Model, ModelId, Provider, ProviderId, ProviderTemplate, ResultStream,
-    SearchMatch, Skill, Snapshot, WorkspaceAuth, WorkspaceId,
+    MigrationResult, Model, ModelId, Provider, ProviderId, ProviderTemplate, ResultStream, Skill,
+    SnapshotCoverage, UndoOutcome, WorkspaceAuth, WorkspaceId,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TextPatchBlock {
-    pub patch: String,
-    pub patched_text: String,
-}
-
-/// Repository for managing file snapshots
+/// Repository for the persistent undo store.
 ///
-/// This repository provides operations for creating and restoring file
-/// snapshots, enabling undo functionality for file modifications.
+/// Snapshots are kept per conversation (each conversation has its own undo
+/// stacks) and survive a restart of that conversation.
 #[async_trait::async_trait]
 pub trait SnapshotRepository: Send + Sync {
-    /// Inserts a new snapshot for the given file path
+    /// Captures the current state of `path` (file, directory, symlink or
+    /// absence) as the newest undo entry of the conversation.
     ///
     /// # Arguments
-    /// * `file_path` - Path to the file to snapshot
+    /// * `conversation` - Conversation that owns the undo stack.
+    /// * `path` - Absolute path about to be mutated.
+    /// * `coverage` - Read coverage to restore with a file snapshot.
+    ///
+    /// # Returns
+    /// Notices for the tool result (e.g. the entry is kept in memory only).
     ///
     /// # Errors
-    /// Returns an error if the snapshot creation fails
-    async fn insert_snapshot(&self, file_path: &Path) -> Result<Snapshot>;
+    /// Returns an error if the store cannot be opened.
+    async fn insert_snapshot(
+        &self,
+        conversation: &ConversationId,
+        path: &Path,
+        coverage: Option<SnapshotCoverage>,
+    ) -> Result<Vec<String>>;
 
-    /// Restores the most recent snapshot for the given file path
-    ///
-    /// # Arguments
-    /// * `file_path` - Path to the file to restore
+    /// Drops the newest undo entry of `path` without restoring it, e.g. when
+    /// the mutation it guarded failed.
     ///
     /// # Errors
-    /// Returns an error if no snapshot exists or restoration fails
-    async fn undo_snapshot(&self, file_path: &Path) -> Result<()>;
+    /// Returns an error if the store cannot be opened.
+    async fn discard_snapshot(&self, conversation: &ConversationId, path: &Path) -> Result<()>;
+
+    /// Restores the newest undo entry of `path`. The entry is removed only
+    /// when the restore succeeds; an unusable entry is discarded and reported.
+    ///
+    /// # Errors
+    /// Returns an error if the filesystem refuses the restore; the entry is
+    /// kept so the undo can be retried.
+    async fn undo_snapshot(
+        &self,
+        conversation: &ConversationId,
+        path: &Path,
+    ) -> Result<UndoOutcome>;
+
+    /// Whether `path` has an undo entry in the conversation.
+    ///
+    /// # Errors
+    /// Returns an error if the store cannot be opened.
+    async fn has_snapshot(&self, conversation: &ConversationId, path: &Path) -> Result<bool>;
 }
 
 /// Repository for managing conversation persistence
@@ -189,62 +210,4 @@ pub trait SkillRepository: Send + Sync {
     /// # Errors
     /// Returns an error if skill loading fails
     async fn load_skills(&self) -> Result<Vec<Skill>>;
-}
-
-/// Repository for validating file syntax
-///
-/// This repository provides operations for validating the syntax of source
-/// code files using remote validation services.
-#[async_trait::async_trait]
-pub trait ValidationRepository: Send + Sync {
-    /// Validates the syntax of a single file
-    ///
-    /// # Arguments
-    /// * `path` - Path to the file (used for determining language and in error
-    ///   messages)
-    /// * `content` - Content of the file to validate
-    ///
-    /// # Returns
-    /// * `Ok(vec![])` - File is valid or file type is not supported by backend
-    /// * `Ok(errors)` - Validation failed with list of syntax errors
-    /// * `Err(_)` - Communication error with validation service
-    async fn validate_file(
-        &self,
-        path: impl AsRef<std::path::Path> + Send,
-        content: &str,
-    ) -> Result<Vec<crate::SyntaxError>>;
-}
-
-/// Repository for fuzzy searching text
-///
-/// This repository provides fuzzy search functionality for searching
-/// needle in haystack with optional search_all flag.
-#[async_trait::async_trait]
-pub trait FuzzySearchRepository: Send + Sync {
-    /// Performs a fuzzy search for a needle in a haystack
-    ///
-    /// # Arguments
-    /// * `needle` - The string to search for
-    /// * `haystack` - The text to search in
-    /// * `search_all` - Whether to search all matches or just the first
-    ///
-    /// # Returns
-    /// * `Ok(Vec<SearchMatch>)` - List of matches with line ranges
-    /// * `Err(_)` - Communication error with search service
-    async fn fuzzy_search(
-        &self,
-        needle: &str,
-        haystack: &str,
-        search_all: bool,
-    ) -> Result<Vec<SearchMatch>>;
-}
-
-#[async_trait::async_trait]
-pub trait TextPatchRepository: Send + Sync {
-    async fn build_text_patch(
-        &self,
-        haystack: &str,
-        old_string: &str,
-        new_string: &str,
-    ) -> Result<TextPatchBlock>;
 }

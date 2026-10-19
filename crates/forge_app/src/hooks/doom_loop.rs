@@ -73,8 +73,23 @@ impl DoomLoopDetector {
             .iter()
             .filter_map(|msg| msg.tool_calls.as_ref())
             .flat_map(|calls| calls.iter())
+            .filter(|call| !Self::is_handle_wait(call))
             .map(|call| (call.name.clone(), call.arguments.clone()))
             .collect()
+    }
+
+    /// X9: polling or waiting on a running handle (shell, task, kernel)
+    /// repeats the same call by design; it is not a loop.
+    fn is_handle_wait(call: &forge_domain::ToolCallFull) -> bool {
+        const HANDLE_TOOLS: [&str; 3] = ["shell", "task", "kernel"];
+        if !HANDLE_TOOLS.contains(&call.name.as_str().to_lowercase().as_str()) {
+            return false;
+        }
+        let Ok(args) = call.arguments.parse() else {
+            return false;
+        };
+        let action = args.get("action").and_then(|a| a.as_str());
+        matches!(action, Some("poll") | Some("wait"))
     }
 
     /// Checks for repeating patterns at the end of the sequence.
@@ -306,6 +321,25 @@ mod tests {
         // Third call - doom loop detected!
         let actual = detector.detect_from_conversation(&conversation);
         let expected = Some(3);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_doom_loop_detector_ignores_handle_polls() {
+        let detector = DoomLoopDetector::new();
+        let poll = ToolCallFull::new("shell").arguments(ToolCallArguments::from_json(
+            r#"{"action": "poll", "handle": "3"}"#,
+        ));
+        let conversation = create_conversation_with_messages(vec![
+            create_assistant_message(&poll),
+            create_assistant_message(&poll),
+            create_assistant_message(&poll),
+            create_assistant_message(&poll),
+        ]);
+
+        let actual = detector.detect_from_conversation(&conversation);
+
+        let expected = None;
         assert_eq!(actual, expected);
     }
 
@@ -734,8 +768,9 @@ mod tests {
             .arguments(ToolCallArguments::from_json(r#"{"command": "ls"}"#));
         let tool_5 = ToolCallFull::new("fs_search")
             .arguments(ToolCallArguments::from_json(r#"{"pattern": "test"}"#));
-        let tool_6 = ToolCallFull::new("sem_search")
-            .arguments(ToolCallArguments::from_json(r#"{"queries": []}"#));
+        let tool_6 = ToolCallFull::new("fetch").arguments(ToolCallArguments::from_json(
+            r#"{"url": "https://example.com"}"#,
+        ));
 
         // Sequence: 1234546454545
         // Let's build it step by step and check at each step

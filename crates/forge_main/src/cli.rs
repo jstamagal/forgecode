@@ -43,12 +43,24 @@ pub struct Cli {
     /// Working directory to use before starting the session.
     ///
     /// When provided, changes to this directory before starting forge.
-    #[arg(long, short = 'C')]
+    #[arg(long)]
     pub directory: Option<PathBuf>,
 
+    /// Run in a jail: every process a tool starts runs under bwrap with
+    /// DIR read-write, the system read-only, /home hidden, a private /tmp and
+    /// the network on; file tools refuse paths outside DIR and `jail_bind`.
+    /// DIR is also the working directory.
+    #[arg(long, short = 'C', value_name = "DIR")]
+    pub jail: Option<PathBuf>,
+
+    /// Turn on the permission policy: tool calls need a matching rule in
+    /// permissions.yaml (otherwise forge asks).
+    #[arg(long, default_value_t = false)]
+    pub restricted: bool,
+
     /// Name for an isolated git worktree to create for experimentation.
-    #[arg(long)]
-    pub sandbox: Option<String>,
+    #[arg(long, alias = "sandbox")]
+    pub worktree: Option<String>,
 
     /// Enable verbose logging output.
     #[arg(long, default_value_t = false)]
@@ -155,6 +167,18 @@ pub enum TopLevelCommand {
 
     /// Interactive fuzzy item picker.
     Select(SelectCommandGroup),
+
+    /// Managed binaries (browse's `obscura`): show their state, or download
+    /// and verify the pinned releases with `--install`.
+    Tools(ToolsArgs),
+}
+
+/// Arguments for `forge tools`.
+#[derive(Parser, Debug, Clone)]
+pub struct ToolsArgs {
+    /// Download, verify (sha256) and install every pinned managed binary.
+    #[arg(long, default_value_t = false)]
+    pub install: bool,
 }
 
 /// Command group for the `forge select` interactive picker.
@@ -445,11 +469,17 @@ pub enum ListCommand {
     #[command(alias = "configs")]
     Config,
 
-    /// List tools for a specific agent.
+    /// List tools for a specific agent: the mode its `tools:` entries give
+    /// each tool (eager, lazy, ban) and the entry that decided it.
     #[command(alias = "tools")]
     Tool {
         /// Agent ID to list tools for.
         agent: AgentId,
+
+        /// Show description and schema size per published tool and the
+        /// total (X26).
+        #[arg(long)]
+        diag: bool,
     },
 
     /// List MCP servers.
@@ -1287,7 +1317,7 @@ mod tests {
         let fixture = Cli::parse_from(["forge", "list", "tool", "sage"]);
         let actual = match fixture.subcommands {
             Some(TopLevelCommand::List(list)) => match list.command {
-                ListCommand::Tool { agent } => agent,
+                ListCommand::Tool { agent, .. } => agent,
                 _ => AgentId::default(),
             },
             _ => AgentId::default(),

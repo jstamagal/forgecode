@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -7,7 +8,79 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub use crate::file_operation::FileOperation;
-use crate::{Todo, TodoItem, TodoStatus};
+use crate::{ReadLedger, SurfaceState, Todo, TodoItem, TodoStatus};
+
+/// Read coverage shared by every clone of a conversation's [`Metrics`], so
+/// file tools and the executor see one ledger for the whole conversation.
+#[derive(Debug, Clone, Default)]
+pub struct SharedLedger(Arc<Mutex<ReadLedger>>);
+
+impl SharedLedger {
+    /// Runs `f` with exclusive access to the ledger.
+    pub fn with<R>(&self, f: impl FnOnce(&mut ReadLedger) -> R) -> R {
+        let mut guard = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        f(&mut guard)
+    }
+
+    /// A copy of the current ledger state.
+    pub fn snapshot(&self) -> ReadLedger {
+        self.with(|ledger| ledger.clone())
+    }
+}
+
+impl PartialEq for SharedLedger {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) || self.snapshot() == other.snapshot()
+    }
+}
+
+impl Serialize for SharedLedger {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.snapshot().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SharedLedger {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        ReadLedger::deserialize(deserializer).map(|ledger| Self(Arc::new(Mutex::new(ledger))))
+    }
+}
+
+/// Tool-surface state (loaded catalog ids, offered skills) shared by every
+/// clone of a conversation's [`Metrics`] (X29).
+#[derive(Debug, Clone, Default)]
+pub struct SharedSurfaceState(Arc<Mutex<SurfaceState>>);
+
+impl SharedSurfaceState {
+    /// Runs `f` with exclusive access to the state.
+    pub fn with<R>(&self, f: impl FnOnce(&mut SurfaceState) -> R) -> R {
+        let mut guard = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        f(&mut guard)
+    }
+
+    /// A copy of the current state.
+    pub fn snapshot(&self) -> SurfaceState {
+        self.with(|state| state.clone())
+    }
+}
+
+impl Serialize for SharedSurfaceState {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.snapshot().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SharedSurfaceState {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        SurfaceState::deserialize(deserializer).map(|state| Self(Arc::new(Mutex::new(state))))
+    }
+}
 
 #[derive(Debug, Clone, Default, Setters, Serialize, Deserialize)]
 #[setters(into, strip_option)]
@@ -27,6 +100,16 @@ pub struct Metrics {
     /// todos that were removed from active updates.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub todos: Vec<Todo>,
+
+    /// Line-level read coverage used by the read-before-edit gate.
+    #[serde(default)]
+    #[setters(skip)]
+    pub reads: SharedLedger,
+
+    /// Tools loaded through `tool_discovery` and skills already offered.
+    #[serde(default)]
+    #[setters(skip)]
+    pub surface: SharedSurfaceState,
 }
 
 impl Metrics {

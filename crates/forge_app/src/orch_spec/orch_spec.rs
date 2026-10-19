@@ -63,38 +63,6 @@ async fn test_rendered_user_message() {
 }
 
 #[tokio::test]
-async fn test_followup_does_not_trigger_session_summary() {
-    let followup_call = ToolCallFull::new("followup")
-        .arguments(json!({"question": "Do you need more information?"}));
-    let followup_result =
-        ToolResult::new("followup").output(Ok(ToolOutput::text("Follow-up question sent")));
-
-    let mut ctx = TestContext::default()
-        .mock_tool_call_responses(vec![(followup_call.clone(), followup_result)])
-        .mock_assistant_responses(vec![
-            ChatCompletionMessage::assistant("I need more information")
-                .tool_calls(vec![followup_call.into()]),
-            ChatCompletionMessage::assistant("Waiting for response")
-                .finish_reason(FinishReason::Stop),
-        ]);
-
-    ctx.run("Ask a follow-up question").await.unwrap();
-
-    let has_chat_complete = ctx
-        .output
-        .chat_responses
-        .iter()
-        .flatten()
-        .any(|response| matches!(response, ChatResponse::TaskComplete));
-
-    assert!(!ctx.output.tools().is_empty(), "Context should've tools.");
-    assert!(
-        !has_chat_complete,
-        "Should NOT have TaskComplete response for followup"
-    );
-}
-
-#[tokio::test]
 async fn test_empty_responses() {
     let mut ctx = TestContext::default().mock_assistant_responses(vec![
         // Empty response 1
@@ -713,4 +681,177 @@ async fn test_complete_when_empty_todos() {
         has_task_complete,
         "Should have TaskComplete when no todos exist"
     );
+}
+
+/// Tool results recorded in the final context, as (call id, text, is_error).
+fn recorded_results(ctx: &TestContext) -> Vec<(String, String, bool)> {
+    ctx.output
+        .context_messages()
+        .iter()
+        .filter_map(|entry| entry.message.as_tool_result())
+        .map(|result| {
+            (
+                result
+                    .call_id
+                    .as_ref()
+                    .map(|id| id.as_str().to_string())
+                    .unwrap_or_default(),
+                result.output.as_str().unwrap_or_default().to_string(),
+                result.is_error(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn test_duplicate_calls_dropped_and_unknown_tool_refused_before_running() {
+    use forge_domain::ToolCallId;
+    let read = |id: &str| {
+        ToolCallFull::new("fs_read")
+            .call_id(ToolCallId::new(id))
+            .arguments(ToolCallArguments::from(json!({"path": "a.txt"})))
+    };
+    let unknown = ToolCallFull::new("fs_raed")
+        .call_id(ToolCallId::new("u"))
+        .arguments(ToolCallArguments::from(json!({})));
+    let result = ToolResult::new("fs_read")
+        .call_id(ToolCallId::new("1"))
+        .output(Ok(ToolOutput::text("content")));
+
+    let mut ctx = TestContext::default()
+        .mock_tool_call_responses(vec![(read("1"), result)])
+        .mock_assistant_responses(vec![
+            ChatCompletionMessage::assistant("Reading").tool_calls(vec![
+                read("1").into(),
+                read("2").into(),
+                unknown.into(),
+            ]),
+            ChatCompletionMessage::assistant("Done").finish_reason(FinishReason::Stop),
+        ]);
+
+    ctx.run("Read").await.unwrap();
+
+    let actual = recorded_results(&ctx);
+    assert_eq!(actual.len(), 2, "{actual:?}");
+    assert_eq!(actual[0], ("1".to_string(), "content".to_string(), false));
+    assert_eq!(actual[1].0, "u");
+    assert!(actual[1].2);
+    assert!(
+        actual[1]
+            .1
+            .contains("unknown tool fs_raed. Did you mean fs_read?"),
+        "{}",
+        actual[1].1
+    );
+}
+
+#[tokio::test]
+async fn test_truncated_tool_arguments_run_nothing() {
+    use forge_domain::ToolCallId;
+    let cut = ToolCallFull::new("fs_write")
+        .call_id(ToolCallId::new("1"))
+        .arguments(ToolCallArguments::from_json(
+            r#"{"path": "a.txt", "content": "unfin"#,
+        ));
+
+    let mut ctx = TestContext::default().mock_assistant_responses(vec![
+        ChatCompletionMessage::assistant("Writing")
+            .tool_calls(vec![cut.into()])
+            .finish_reason(FinishReason::Length),
+        ChatCompletionMessage::assistant("Retrying").finish_reason(FinishReason::Stop),
+    ]);
+
+    ctx.run("Write").await.unwrap();
+
+    let assistant_texts: Vec<String> = ctx
+        .output
+        .context_messages()
+        .iter()
+        .filter(|entry| entry.message.has_role(Role::Assistant))
+        .filter_map(|entry| entry.message.content().map(str::to_string))
+        .collect();
+    assert!(recorded_results(&ctx).is_empty());
+    assert!(
+        assistant_texts[0].contains("dropped truncated tool call arguments for fs_write"),
+        "{assistant_texts:?}"
+    );
+}
+
+/// T24 end to end: a lazy tool is refused with the exact load call until it
+/// is loaded, and published (and callable) from the next request on.
+#[tokio::test]
+async fn test_lazy_tool_is_published_after_load() {
+    use forge_domain::{
+        SharedSurface, SurfaceData, SurfaceTool, ToolCallId, ToolDefinition, ToolMode, ToolSource,
+    };
+    let tool = |name: &str, mode| SurfaceTool {
+        definition: ToolDefinition::new(name),
+        mode,
+        source: ToolSource::Native,
+    };
+    let surface = SharedSurface::new(SurfaceData {
+        tools: vec![
+            tool("fs_read", ToolMode::Eager),
+            tool("lsp", ToolMode::Lazy),
+            tool(forge_domain::TOOL_DISCOVERY, ToolMode::Eager),
+        ],
+        ..Default::default()
+    });
+    let call = |name: &str, id: &str, args: serde_json::Value| {
+        ToolCallFull::new(name)
+            .call_id(ToolCallId::new(id))
+            .arguments(ToolCallArguments::from(args))
+    };
+    let early = call("lsp", "1", json!({}));
+    let load = call(
+        forge_domain::TOOL_DISCOVERY,
+        "2",
+        json!({"load": "native:lsp"}),
+    );
+    let late = call("lsp", "3", json!({}));
+    let ok = |c: &ToolCallFull, text: &str| {
+        ToolResult::new(c.name.clone())
+            .call_id(c.call_id.clone().unwrap())
+            .output(Ok(ToolOutput::text(text)))
+    };
+
+    let mut ctx = TestContext::default()
+        .surface(surface)
+        .mock_tool_call_responses(vec![
+            (
+                load.clone(),
+                ok(&load, r#"{"id":"native:lsp","loaded":["lsp"]}"#),
+            ),
+            (late.clone(), ok(&late, "diagnostics: none")),
+        ])
+        .mock_assistant_responses(vec![
+            ChatCompletionMessage::assistant("Try").tool_calls(vec![early.into()]),
+            ChatCompletionMessage::assistant("Load").tool_calls(vec![load.into()]),
+            ChatCompletionMessage::assistant("Use").tool_calls(vec![late.into()]),
+            ChatCompletionMessage::assistant("Done").finish_reason(FinishReason::Stop),
+        ]);
+
+    ctx.run("Check diagnostics").await.unwrap();
+
+    let results = recorded_results(&ctx);
+    let published_last: Vec<String> = ctx
+        .output
+        .conversation_history
+        .last()
+        .and_then(|c| c.context.as_ref())
+        .map(|c| c.tools.iter().map(|t| t.name.to_string()).collect())
+        .unwrap_or_default();
+    assert!(results[0].2, "{results:?}");
+    assert!(
+        results[0]
+            .1
+            .contains("tool_discovery {\"load\":\"native:lsp\"}"),
+        "{}",
+        results[0].1
+    );
+    assert_eq!(
+        results[2],
+        ("3".to_string(), "diagnostics: none".to_string(), false)
+    );
+    assert_eq!(published_last, vec!["fs_read", "lsp", "tool_discovery"]);
 }

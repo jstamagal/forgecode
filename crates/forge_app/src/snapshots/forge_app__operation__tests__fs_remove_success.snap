@@ -4,6 +4,6 @@ expression: to_value(actual)
 ---
 <file_removed
   path="/home/user/file_to_delete.txt"
-  status="completed"
+  status="deleted"
 >
 </file_removed>

@@ -31,8 +31,19 @@ pub struct PatchOutput {
     pub before: String,
     pub after: String,
     pub content_hash: String,
+    /// Number of edits in the call.
+    pub edits: usize,
+    /// Replacement count: occurrences for `replace_all` edits, one otherwise.
+    pub replacements: usize,
+    /// Number of edits that matched only after normalisation.
+    pub fuzzy_edits: usize,
+    /// Whether the call used the batch (`edits`) form.
+    pub batch: bool,
+    /// Undo-store notices for the result (e.g. snapshot kept in memory only).
+    pub notices: Vec<String>,
 }
 
+/// What a `read` call produced.
 #[derive(Debug, Setters)]
 #[setters(into)]
 pub struct ReadOutput {
@@ -42,8 +53,25 @@ pub struct ReadOutput {
 
 #[derive(Debug)]
 pub enum Content {
+    /// Raw text of the requested window (no line numbers). Used by
+    /// non-tool callers such as the change detector.
     File(String),
+    /// An image (or a PDF passed through as an image).
     Image(Image),
+    /// Finished model-facing text: numbered lines or byte page plus footer,
+    /// a notebook view, extracted PDF text, a repeat-read stub, or an
+    /// informational note.
+    Rendered(RenderedRead),
+}
+
+/// Model-facing text of a read and the coverage it delivered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedRead {
+    /// Text to return to the model.
+    pub text: String,
+    /// The line window shown with line numbers, used to narrow coverage when
+    /// the result is clipped later.
+    pub numbered_window: Option<(u64, u64)>,
 }
 
 impl Content {
@@ -55,9 +83,15 @@ impl Content {
         Self::Image(image)
     }
 
+    /// Model-facing rendered text.
+    pub fn rendered(text: impl Into<String>, numbered_window: Option<(u64, u64)>) -> Self {
+        Self::Rendered(RenderedRead { text: text.into(), numbered_window })
+    }
+
     pub fn file_content(&self) -> &str {
         match self {
             Self::File(content) => content,
+            Self::Rendered(rendered) => &rendered.text,
             Self::Image(_) => "",
         }
     }
@@ -71,62 +105,35 @@ impl Content {
 }
 
 #[derive(Debug)]
-pub struct SearchResult {
-    pub matches: Vec<Match>,
-}
-
-#[derive(Debug)]
-pub struct Match {
-    pub path: String,
-    pub result: Option<MatchResult>,
-}
-
-#[derive(Debug)]
-pub enum MatchResult {
-    Error(String),
-    Found {
-        line_number: Option<usize>,
-        line: String,
-    },
-    Count {
-        count: usize,
-    },
-    FileMatch, // For files_with_matches mode
-    ContextMatch {
-        line_number: Option<usize>,
-        line: String,
-        before_context: Vec<String>,
-        after_context: Vec<String>,
-    },
-}
-
-#[derive(Debug)]
-pub struct HttpResponse {
-    pub content: String,
-    pub code: u16,
-    pub context: ResponseContext,
-    pub content_type: String,
-}
-
-#[derive(Debug)]
-pub enum ResponseContext {
-    Parsed,
-    Raw,
-}
-
-#[derive(Debug)]
 pub struct FsWriteOutput {
     pub path: String,
     // Set when the file already exists
     pub before: Option<String>,
     pub errors: Vec<SyntaxError>,
     pub content_hash: String,
+    /// Bytes written.
+    pub bytes: usize,
+    /// Undo-store notices for the result.
+    pub notices: Vec<String>,
+}
+
+/// What `remove` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoveMode {
+    /// Moved to the trash with `trash`/`trash-put`.
+    Trashed,
+    /// Deleted permanently.
+    Deleted,
 }
 
 #[derive(Debug)]
 pub struct FsRemoveOutput {
-    // Content of the file
+    // Content of the file (empty for directories, symlinks and binary files)
     pub content: String,
+    /// How the path was removed.
+    pub mode: RemoveMode,
+    /// Undo-store notices for the result.
+    pub notices: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -136,10 +143,25 @@ pub struct PlanCreateOutput {
     pub before: Option<String>,
 }
 
-#[derive(Default, Debug, derive_more::From)]
+/// What `undo` did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UndoKind {
+    /// A regular file was restored.
+    File,
+    /// A directory tree was restored.
+    Directory,
+    /// A symlink was restored.
+    Symlink { target: String },
+    /// The path did not exist before the undone change; it was deleted.
+    Deletion,
+}
+
+#[derive(Debug)]
 pub struct FsUndoOutput {
     pub before_undo: Option<String>,
     pub after_undo: Option<String>,
+    /// The kind of state restored.
+    pub kind: UndoKind,
 }
 
 /// Output from todo_write tool execution
@@ -225,6 +247,17 @@ pub trait McpConfigManager: Send + Sync {
 pub trait McpService: Send + Sync {
     async fn get_mcp_servers(&self) -> anyhow::Result<McpServers>;
     async fn execute_mcp(&self, call: ToolCallFull) -> anyhow::Result<ToolOutput>;
+    /// M3: a resource or prompt request to the connected server `server`;
+    /// the result has the server's configured secrets redacted.
+    ///
+    /// # Errors
+    /// Returns an error when the server is not connected or the request
+    /// fails.
+    async fn mcp_control(
+        &self,
+        server: &str,
+        request: crate::McpControl,
+    ) -> anyhow::Result<serde_json::Value>;
     /// Refresh the MCP cache by fetching fresh data
     async fn reload_mcp(&self) -> anyhow::Result<()>;
     /// Applies the interactive trust gate for any project-local MCP config.
@@ -341,36 +374,124 @@ pub trait FsWriteService: Send + Sync {
         content: String,
         overwrite: bool,
     ) -> anyhow::Result<FsWriteOutput>;
+
+    /// The `write` tool: like [`FsWriteService::write`], plus the overwrite
+    /// gate (prior read, unchanged hash; a changed file is refused with a
+    /// diff), an undo snapshot taken before writing, and read-coverage
+    /// bookkeeping.
+    ///
+    /// # Errors
+    /// Returns the refusal or IO error the model should see.
+    async fn write_tool(
+        &self,
+        path: String,
+        content: String,
+        overwrite: bool,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<FsWriteOutput>;
 }
 
 #[async_trait::async_trait]
 pub trait PlanCreateService: Send + Sync {
-    /// Create a plan file with the specified name and version.
+    /// Writes `{plans_dir}/{date}-{name}-{version}.md` (name and version
+    /// sanitised). An existing plan is replaced only with `overwrite`, and
+    /// is snapshotted first so undo brings it back (T20).
+    ///
+    /// # Errors
+    /// Returns an error when the plan exists and `overwrite` is false, or the
+    /// file cannot be written.
     async fn create_plan(
         &self,
         plan_name: String,
         version: String,
         content: String,
+        overwrite: bool,
+        context: &forge_domain::ToolCallContext,
     ) -> anyhow::Result<PlanCreateOutput>;
+}
+
+/// Runs one tool on behalf of a kernel cell (T16 tool bridge): the same
+/// dispatch as a direct call. Returns the result text, or the error text.
+pub type CellToolBridge = std::sync::Arc<
+    dyn Fn(String, serde_json::Value) -> futures::future::BoxFuture<'static, Result<String, String>>
+        + Send
+        + Sync,
+>;
+
+/// The phase 7 capability tools (T11–T19, T25): terminal, lsp, kernel,
+/// toolbox, browse, browser_probe, web/doc search, notebook_edit and the wiki
+/// helpers. One service so `Services` stays small.
+#[async_trait::async_trait]
+pub trait CapabilityService: Send + Sync {
+    /// Runs one capability tool. `cwd` is the working directory; paths in
+    /// `input` are already absolute and jail-confined.
+    ///
+    /// # Errors
+    /// Returns the error the model should see.
+    async fn run_capability(
+        &self,
+        input: forge_domain::ToolCatalog,
+        cwd: std::path::PathBuf,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<forge_domain::ToolOutput>;
+
+    /// The kernel tool (T16). `bridge` runs `tools.<name>(...)` calls from
+    /// cells; `names` lists what a cell may call.
+    ///
+    /// # Errors
+    /// Returns the error the model should see.
+    async fn run_kernel(
+        &self,
+        input: forge_domain::Kernel,
+        cwd: std::path::PathBuf,
+        context: &forge_domain::ToolCallContext,
+        bridge: CellToolBridge,
+        names: Vec<String>,
+    ) -> anyhow::Result<String>;
 }
 
 #[async_trait::async_trait]
 pub trait FsPatchService: Send + Sync {
-    /// Patches a file at the specified path with the given content.
+    /// Applies `edits` in order to the file at `path`, all-or-nothing, and
+    /// writes the result once.
+    ///
+    /// # Arguments
+    /// * `path` - Absolute path of the file.
+    /// * `edits` - Replacements applied in order, each seeing the previous
+    ///   result.
+    /// * `batch` - Whether the call used the `edits` form; errors then name the
+    ///   failing edit index.
+    ///
+    /// # Errors
+    /// Returns an error when the read gate refuses, an edit does not match or
+    /// matches ambiguously, or the file cannot be read or written.
     async fn patch(
         &self,
         path: String,
-        search: String,
-        content: String,
-        replace_all: bool,
-    ) -> anyhow::Result<PatchOutput>;
-
-    /// Applies multiple patches to a single file in sequence
-    async fn multi_patch(
-        &self,
-        path: String,
         edits: Vec<forge_domain::PatchEdit>,
+        batch: bool,
+        context: &forge_domain::ToolCallContext,
     ) -> anyhow::Result<PatchOutput>;
+}
+
+/// Arguments of a `read` tool call after path resolution.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Setters)]
+#[setters(strip_option, into)]
+pub struct ReadRequest {
+    /// Absolute path.
+    pub path: String,
+    /// First line (1-based) of a line range.
+    pub start_line: Option<u64>,
+    /// Last line (inclusive) of a line range.
+    pub end_line: Option<u64>,
+    /// First byte of a byte range.
+    pub start_byte: Option<u64>,
+    /// One past the last byte of a byte range.
+    pub end_byte: Option<u64>,
+    /// Whether lines are prefixed with their numbers.
+    pub show_line_numbers: bool,
+    /// Whether the model accepts image input.
+    pub vision: bool,
 }
 
 #[async_trait::async_trait]
@@ -382,6 +503,18 @@ pub trait FsReadService: Send + Sync {
         start_line: Option<u64>,
         end_line: Option<u64>,
     ) -> anyhow::Result<ReadOutput>;
+
+    /// The `read` tool: line or byte ranges, PDF text, notebook view, image
+    /// passthrough, whole-file size gate, continuation footers, coverage
+    /// recording and repeat-read stubs.
+    ///
+    /// # Errors
+    /// Returns the error the model should see.
+    async fn read_tool(
+        &self,
+        request: ReadRequest,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<ReadOutput>;
 }
 
 #[async_trait::async_trait]
@@ -392,49 +525,108 @@ pub trait ImageReadService: Send + Sync {
 
 #[async_trait::async_trait]
 pub trait FsRemoveService: Send + Sync {
-    /// Removes a file at the specified path.
-    async fn remove(&self, path: String) -> anyhow::Result<FsRemoveOutput>;
+    /// Removes a file, directory or symlink: to the trash by default, or
+    /// permanently. The path is snapshotted first so `undo` can restore it.
+    ///
+    /// # Errors
+    /// Returns an error when the path does not exist, the trash command is
+    /// missing or fails, or the target is too large to trash.
+    async fn remove(
+        &self,
+        path: String,
+        permanent: bool,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<FsRemoveOutput>;
 }
 
 #[async_trait::async_trait]
 pub trait FsSearchService: Send + Sync {
-    /// Searches for files and content based on the provided parameters.
+    /// Searches file contents (or lists files with matches / counts) and
+    /// returns the model-facing text: absolute paths, `path:line:text`
+    /// content lines, a paging footer when `head_limit` cut the result.
     ///
     /// # Arguments
-    /// * `params` - Search parameters including pattern, path, output mode,
-    ///   etc.
+    /// * `params` - Search parameters; `path` must already be absolute.
     ///
-    /// # Returns
-    /// * `Ok(Some(SearchResult))` - Matches found
-    /// * `Ok(None)` - No matches found
-    /// * `Err(_)` - Search error
-    async fn search(&self, params: forge_domain::FSSearch) -> anyhow::Result<Option<SearchResult>>;
-}
+    /// # Errors
+    /// Returns an error for a bad regex/glob/type, a missing path, or a search
+    /// that runs past its timeout.
+    async fn search(&self, params: forge_domain::FSSearch) -> anyhow::Result<String>;
 
-#[async_trait::async_trait]
-pub trait FollowUpService: Send + Sync {
-    /// Follows up on a tool call with the given context.
-    async fn follow_up(
+    /// The `ast_search` tool: structural matches with captures; with
+    /// `rewrite`, a unified-diff dry run; with `apply`, writes the rewrite
+    /// (snapshotting and re-reading every changed file into the read ledger).
+    ///
+    /// # Arguments
+    /// * `params` - Tool input; `path` must already be absolute.
+    /// * `context` - Tool call context (undo store, read ledger).
+    ///
+    /// # Errors
+    /// Returns an error for a missing path, an unknown language, a pattern
+    /// that does not parse, or an apply with more matches than `max_results`.
+    async fn ast_search(
         &self,
-        question: String,
-        options: Vec<String>,
-        multiple: Option<bool>,
-    ) -> anyhow::Result<Option<String>>;
+        params: forge_domain::AstSearch,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<String>;
 }
 
 #[async_trait::async_trait]
 pub trait FsUndoService: Send + Sync {
-    /// Undoes the last file operation at the specified path.
-    /// And returns the content of the undone file.
-    // TODO: We should move Snapshot service to Services from infra
-    // and drop FsUndoService.
-    async fn undo(&self, path: String) -> anyhow::Result<FsUndoOutput>;
+    /// Restores the newest snapshot of `path` in this conversation.
+    ///
+    /// # Errors
+    /// Returns an error when there is no snapshot, the snapshot is unusable
+    /// (it is then discarded), or the filesystem refuses the restore (the
+    /// snapshot is kept for a retry).
+    async fn undo(
+        &self,
+        path: String,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<FsUndoOutput>;
+
+    /// Records the current state of `path` (file, directory, symlink or
+    /// absence) as an undo entry before a tool other than write/patch/remove
+    /// changes it. Returns undo-store notices for the result.
+    ///
+    /// # Errors
+    /// Returns an error if the undo store cannot be opened.
+    async fn snapshot_before_write(
+        &self,
+        path: &std::path::Path,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<Vec<String>>;
+}
+
+/// A `fetch` tool request after argument resolution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FetchRequest {
+    /// http(s):// or file:// URL.
+    pub url: String,
+    /// Upper-case HTTP method.
+    pub method: String,
+    /// Request headers.
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// Request body text.
+    pub body: Option<String>,
+    /// Request body as JSON.
+    pub json_body: Option<serde_json::Value>,
+    /// Return the body without HTML conversion.
+    pub raw: bool,
+    /// Absolute path to stream the body to.
+    pub save: Option<PathBuf>,
+    /// Whether the model accepts image input.
+    pub vision: bool,
 }
 
 #[async_trait::async_trait]
 pub trait NetFetchService: Send + Sync {
-    /// Fetches content from a URL and returns it as a string.
-    async fn fetch(&self, url: String, raw: Option<bool>) -> anyhow::Result<HttpResponse>;
+    /// The `fetch` tool: any method, headers and body, `save` streaming with
+    /// resume, `file://`, binary descriptors and images.
+    ///
+    /// # Errors
+    /// Returns the error the model should see.
+    async fn fetch_tool(&self, request: FetchRequest) -> anyhow::Result<forge_domain::ToolOutput>;
 }
 
 #[async_trait::async_trait]
@@ -449,6 +641,14 @@ pub trait ShellService: Send + Sync {
         env_vars: Option<Vec<String>>,
         description: Option<String>,
     ) -> anyhow::Result<ShellOutput>;
+
+    /// The `shell` tool: run (with a wait window that returns a handle instead
+    /// of killing), poll, wait or kill. Returns the model-facing text.
+    ///
+    /// # Errors
+    /// Returns an error for a missing command, an unknown handle, or a shell
+    /// that cannot be spawned.
+    async fn shell_tool(&self, input: forge_domain::Shell, cwd: PathBuf) -> anyhow::Result<String>;
 }
 
 #[async_trait::async_trait]
@@ -556,7 +756,6 @@ pub trait Services: Send + Sync + 'static + Clone + EnvironmentInfra {
     type ImageReadService: ImageReadService;
     type FsRemoveService: FsRemoveService;
     type FsSearchService: FsSearchService;
-    type FollowUpService: FollowUpService;
     type FsUndoService: FsUndoService;
     type NetFetchService: NetFetchService;
     type ShellService: ShellService;
@@ -568,6 +767,7 @@ pub trait Services: Send + Sync + 'static + Clone + EnvironmentInfra {
     type ProviderAuthService: ProviderAuthService;
     type WorkspaceService: WorkspaceService;
     type SkillFetchService: SkillFetchService;
+    type CapabilityService: CapabilityService;
 
     fn provider_service(&self) -> &Self::ProviderService;
     fn config_service(&self) -> &Self::AppConfigService;
@@ -583,7 +783,6 @@ pub trait Services: Send + Sync + 'static + Clone + EnvironmentInfra {
     fn image_read_service(&self) -> &Self::ImageReadService;
     fn fs_remove_service(&self) -> &Self::FsRemoveService;
     fn fs_search_service(&self) -> &Self::FsSearchService;
-    fn follow_up_service(&self) -> &Self::FollowUpService;
     fn fs_undo_service(&self) -> &Self::FsUndoService;
     fn net_fetch_service(&self) -> &Self::NetFetchService;
     fn shell_service(&self) -> &Self::ShellService;
@@ -596,6 +795,34 @@ pub trait Services: Send + Sync + 'static + Clone + EnvironmentInfra {
     fn provider_auth_service(&self) -> &Self::ProviderAuthService;
     fn workspace_service(&self) -> &Self::WorkspaceService;
     fn skill_fetch_service(&self) -> &Self::SkillFetchService;
+    fn capability_service(&self) -> &Self::CapabilityService;
+}
+
+#[async_trait::async_trait]
+impl<I: Services> CapabilityService for I {
+    async fn run_capability(
+        &self,
+        input: forge_domain::ToolCatalog,
+        cwd: std::path::PathBuf,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<forge_domain::ToolOutput> {
+        self.capability_service()
+            .run_capability(input, cwd, context)
+            .await
+    }
+
+    async fn run_kernel(
+        &self,
+        input: forge_domain::Kernel,
+        cwd: std::path::PathBuf,
+        context: &forge_domain::ToolCallContext,
+        bridge: CellToolBridge,
+        names: Vec<String>,
+    ) -> anyhow::Result<String> {
+        self.capability_service()
+            .run_kernel(input, cwd, context, bridge, names)
+            .await
+    }
 }
 
 #[async_trait::async_trait]
@@ -705,6 +932,14 @@ impl<I: Services> McpService for I {
         self.mcp_service().execute_mcp(call).await
     }
 
+    async fn mcp_control(
+        &self,
+        server: &str,
+        request: crate::McpControl,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.mcp_service().mcp_control(server, request).await
+    }
+
     async fn reload_mcp(&self) -> anyhow::Result<()> {
         self.mcp_service().reload_mcp().await
     }
@@ -761,6 +996,18 @@ impl<I: Services> FsWriteService for I {
             .write(path, content, overwrite)
             .await
     }
+
+    async fn write_tool(
+        &self,
+        path: String,
+        content: String,
+        overwrite: bool,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<FsWriteOutput> {
+        self.fs_create_service()
+            .write_tool(path, content, overwrite, context)
+            .await
+    }
 }
 
 #[async_trait::async_trait]
@@ -770,9 +1017,11 @@ impl<I: Services> PlanCreateService for I {
         plan_name: String,
         version: String,
         content: String,
+        overwrite: bool,
+        context: &forge_domain::ToolCallContext,
     ) -> anyhow::Result<PlanCreateOutput> {
         self.plan_create_service()
-            .create_plan(plan_name, version, content)
+            .create_plan(plan_name, version, content, overwrite, context)
             .await
     }
 }
@@ -782,21 +1031,13 @@ impl<I: Services> FsPatchService for I {
     async fn patch(
         &self,
         path: String,
-        search: String,
-        content: String,
-        replace_all: bool,
+        edits: Vec<forge_domain::PatchEdit>,
+        batch: bool,
+        context: &forge_domain::ToolCallContext,
     ) -> anyhow::Result<PatchOutput> {
         self.fs_patch_service()
-            .patch(path, search, content, replace_all)
+            .patch(path, edits, batch, context)
             .await
-    }
-
-    async fn multi_patch(
-        &self,
-        path: String,
-        edits: Vec<forge_domain::PatchEdit>,
-    ) -> anyhow::Result<PatchOutput> {
-        self.fs_patch_service().multi_patch(path, edits).await
     }
 }
 
@@ -812,6 +1053,14 @@ impl<I: Services> FsReadService for I {
             .read(path, start_line, end_line)
             .await
     }
+
+    async fn read_tool(
+        &self,
+        request: ReadRequest,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<ReadOutput> {
+        self.fs_read_service().read_tool(request, context).await
+    }
 }
 #[async_trait::async_trait]
 impl<I: Services> ImageReadService for I {
@@ -822,43 +1071,58 @@ impl<I: Services> ImageReadService for I {
 
 #[async_trait::async_trait]
 impl<I: Services> FsRemoveService for I {
-    async fn remove(&self, path: String) -> anyhow::Result<FsRemoveOutput> {
-        self.fs_remove_service().remove(path).await
-    }
-}
-
-#[async_trait::async_trait]
-impl<I: Services> FsSearchService for I {
-    async fn search(&self, params: forge_domain::FSSearch) -> anyhow::Result<Option<SearchResult>> {
-        self.fs_search_service().search(params).await
-    }
-}
-
-#[async_trait::async_trait]
-impl<I: Services> FollowUpService for I {
-    async fn follow_up(
+    async fn remove(
         &self,
-        question: String,
-        options: Vec<String>,
-        multiple: Option<bool>,
-    ) -> anyhow::Result<Option<String>> {
-        self.follow_up_service()
-            .follow_up(question, options, multiple)
+        path: String,
+        permanent: bool,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<FsRemoveOutput> {
+        self.fs_remove_service()
+            .remove(path, permanent, context)
             .await
     }
 }
 
 #[async_trait::async_trait]
+impl<I: Services> FsSearchService for I {
+    async fn search(&self, params: forge_domain::FSSearch) -> anyhow::Result<String> {
+        self.fs_search_service().search(params).await
+    }
+
+    async fn ast_search(
+        &self,
+        params: forge_domain::AstSearch,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<String> {
+        self.fs_search_service().ast_search(params, context).await
+    }
+}
+
+#[async_trait::async_trait]
 impl<I: Services> FsUndoService for I {
-    async fn undo(&self, path: String) -> anyhow::Result<FsUndoOutput> {
-        self.fs_undo_service().undo(path).await
+    async fn undo(
+        &self,
+        path: String,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<FsUndoOutput> {
+        self.fs_undo_service().undo(path, context).await
+    }
+
+    async fn snapshot_before_write(
+        &self,
+        path: &std::path::Path,
+        context: &forge_domain::ToolCallContext,
+    ) -> anyhow::Result<Vec<String>> {
+        self.fs_undo_service()
+            .snapshot_before_write(path, context)
+            .await
     }
 }
 
 #[async_trait::async_trait]
 impl<I: Services> NetFetchService for I {
-    async fn fetch(&self, url: String, raw: Option<bool>) -> anyhow::Result<HttpResponse> {
-        self.net_fetch_service().fetch(url, raw).await
+    async fn fetch_tool(&self, request: FetchRequest) -> anyhow::Result<forge_domain::ToolOutput> {
+        self.net_fetch_service().fetch_tool(request).await
     }
 }
 
@@ -876,6 +1140,10 @@ impl<I: Services> ShellService for I {
         self.shell_service()
             .execute(command, cwd, keep_ansi, silent, env_vars, description)
             .await
+    }
+
+    async fn shell_tool(&self, input: forge_domain::Shell, cwd: PathBuf) -> anyhow::Result<String> {
+        self.shell_service().shell_tool(input, cwd).await
     }
 }
 

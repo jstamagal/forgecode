@@ -1,7 +1,5 @@
 use std::path::Path;
 
-use crate::{Match, MatchResult};
-
 /// Formats a path for display, converting absolute paths to relative when
 /// possible
 ///
@@ -44,50 +42,6 @@ pub fn format_display_path(path: &Path, cwd: &Path) -> String {
 /// # Returns
 /// * A truncated version of the key for safe display
 pub use forge_domain::truncate_key;
-
-pub fn format_match(matched: &Match, base_dir: &Path) -> String {
-    match &matched.result {
-        Some(MatchResult::Error(err)) => format!("Error reading {}: {}", matched.path, err),
-        Some(MatchResult::Found { line_number, line }) => {
-            let path = format_display_path(Path::new(&matched.path), base_dir);
-            match line_number {
-                Some(num) => format!("{}:{}:{}", path, num, line),
-                None => format!("{}:{}", path, line),
-            }
-        }
-        Some(MatchResult::Count { count }) => {
-            format!(
-                "{}:{}",
-                format_display_path(Path::new(&matched.path), base_dir),
-                count
-            )
-        }
-        Some(MatchResult::FileMatch) => format_display_path(Path::new(&matched.path), base_dir),
-        Some(MatchResult::ContextMatch { line_number, line, before_context, after_context }) => {
-            let path = format_display_path(Path::new(&matched.path), base_dir);
-            let mut output = String::new();
-
-            // Add before context lines
-            for ctx_line in before_context {
-                output.push_str(&format!("{}-{}\n", path, ctx_line));
-            }
-
-            // Add the match line
-            match line_number {
-                Some(num) => output.push_str(&format!("{}:{}:{}", path, num, line)),
-                None => output.push_str(&format!("{}:{}", path, line)),
-            }
-
-            // Add after context lines
-            for ctx_line in after_context {
-                output.push_str(&format!("\n{}-{}", path, ctx_line));
-            }
-
-            output
-        }
-        None => format_display_path(Path::new(&matched.path), base_dir),
-    }
-}
 
 /// Computes SHA-256 hash of the given content
 ///

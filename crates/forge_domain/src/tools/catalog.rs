@@ -14,7 +14,11 @@ use serde_json::Map;
 use strum::IntoEnumIterator;
 use strum_macros::{AsRefStr, Display, EnumDiscriminants, EnumIter};
 
-use crate::{ToolCallArguments, ToolCallFull, ToolDefinition, ToolDescription, ToolName};
+use crate::{
+    Browse, BrowserProbe, DocsSearch, ExaSearch, Kernel, Lsp, NotebookEdit, SerperSearch,
+    TavilySearch, TerminalSession, TerminalSnapshot, ToolCallArguments, ToolCallFull,
+    ToolDefinition, ToolDescription, ToolName, Toolbox, WikiConvert, WikiFinishIngest, WikiWrite,
+};
 
 /// Enum representing all possible tool input types.
 ///
@@ -44,20 +48,161 @@ pub enum ToolCatalog {
     #[serde(alias = "Write")]
     Write(FSWrite),
     FsSearch(FSSearch),
-    SemSearch(SemanticSearch),
+    AstSearch(AstSearch),
     Remove(FSRemove),
     Patch(FSPatch),
-    MultiPatch(FSMultiPatch),
     Undo(FSUndo),
     Shell(Shell),
     Fetch(NetFetch),
-    Followup(Followup),
     Plan(PlanCreate),
     Skill(SkillFetch),
     TodoWrite(TodoWrite),
     TodoRead(TodoRead),
     #[serde(alias = "Task")]
     Task(TaskInput),
+    ToolDiscovery(ToolDiscovery),
+    #[from(ignore)]
+    McpResourceList(McpServerArg),
+    #[from(ignore)]
+    McpResourceTemplates(McpServerArg),
+    #[from(ignore)]
+    McpResourceRead(McpResourceArg),
+    #[from(ignore)]
+    McpResourceSubscribe(McpResourceArg),
+    #[from(ignore)]
+    McpResourceUnsubscribe(McpResourceArg),
+    #[from(ignore)]
+    McpPromptList(McpServerArg),
+    McpPromptGet(McpPromptArg),
+    TerminalSession(TerminalSession),
+    TerminalSnapshot(TerminalSnapshot),
+    Lsp(Lsp),
+    Kernel(Kernel),
+    Toolbox(Toolbox),
+    Browse(Browse),
+    BrowserProbe(BrowserProbe),
+    SerperSearch(SerperSearch),
+    TavilySearch(TavilySearch),
+    ExaSearch(ExaSearch),
+    DocsSearch(DocsSearch),
+    NotebookEdit(NotebookEdit),
+    WikiConvert(WikiConvert),
+    WikiWrite(WikiWrite),
+    WikiFinishIngest(WikiFinishIngest),
+}
+
+/// Input for MCP controls that act on a whole server (M3).
+#[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct McpServerArg {
+    /// Exact MCP server name (from a `tool_discovery` mcp status row).
+    pub server: String,
+}
+
+/// Input for MCP controls that act on one resource (M3).
+#[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct McpResourceArg {
+    /// Exact MCP server name (from a `tool_discovery` mcp status row).
+    pub server: String,
+    /// Exact resource URI, as returned by `mcp_resource_list` or
+    /// `mcp_resource_templates`.
+    pub uri: String,
+}
+
+/// Input for `mcp_prompt_get` (M3).
+#[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct McpPromptArg {
+    /// Exact MCP server name (from a `tool_discovery` mcp status row).
+    pub server: String,
+    /// Exact prompt name, as returned by `mcp_prompt_list`.
+    pub name: String,
+    /// Prompt arguments, name to string value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<std::collections::BTreeMap<String, String>>,
+}
+
+/// Shared setup sentence of the MCP control descriptions.
+const MCP_CONTROL_SETUP: &str = " Before using it, run tool_discovery with kind=\"mcp\" (or an MCP server name as source) to connect the servers, then pass the exact server name of an mcp status row.";
+
+impl ToolCatalog {
+    /// Descriptions of the MCP controls (M3), which have no description
+    /// file of their own.
+    fn mcp_control_description(&self) -> Option<String> {
+        let (what, extra) = match self {
+            ToolCatalog::McpResourceList(_) => ("List the resources of an MCP server.", ""),
+            ToolCatalog::McpResourceTemplates(_) => {
+                ("List the resource templates of an MCP server.", "")
+            }
+            ToolCatalog::McpResourceRead(_) => (
+                "Read an MCP resource by URI.",
+                " Copy an exact URI from mcp_resource_list or mcp_resource_templates.",
+            ),
+            ToolCatalog::McpResourceSubscribe(_) => (
+                "Subscribe to update notifications for an MCP resource.",
+                " Copy an exact URI from mcp_resource_list.",
+            ),
+            ToolCatalog::McpResourceUnsubscribe(_) => (
+                "Stop update notifications for an MCP resource.",
+                " Copy an exact URI from mcp_resource_list.",
+            ),
+            ToolCatalog::McpPromptList(_) => ("List the prompts of an MCP server.", ""),
+            ToolCatalog::McpPromptGet(_) => (
+                "Get an MCP prompt and its messages.",
+                " Copy an exact prompt name from mcp_prompt_list.",
+            ),
+            _ => return None,
+        };
+        Some(format!(
+            "{what}{MCP_CONTROL_SETUP}{extra} Configured secrets are redacted from the result."
+        ))
+    }
+}
+
+/// Input for `tool_discovery`: search the catalog of loadable tools and
+/// skills, or load one by id.
+#[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
+#[tool_description_file = "crates/forge_domain/src/tools/descriptions/tool_discovery.md"]
+pub struct ToolDiscovery {
+    /// Intent or words to search for; empty returns a compact index.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub query: String,
+
+    /// Catalog id to load, such as `native:lsp`, `mcp:github__list_issues`
+    /// or `skill:review`; a tool's bare name also works.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load: Option<String>,
+
+    /// Only rows of this kind: native, mcp or skill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<DiscoveryKind>,
+
+    /// Only rows with this source: an MCP server name, `native`, `skill`, or
+    /// `mcp` for every MCP server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+
+    /// Continue a truncated result at its `next_offset`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u32>,
+}
+
+/// Catalog kind filter for `tool_discovery`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, AsRefStr, EnumIter)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum DiscoveryKind {
+    Native,
+    Mcp,
+    Skill,
+}
+
+impl JsonSchema for DiscoveryKind {
+    fn schema_name() -> Cow<'static, str> {
+        <Self as SimpleEnumSchema>::simple_enum_schema_name()
+    }
+
+    fn json_schema(r#gen: &mut schemars::generate::SchemaGenerator) -> Schema {
+        <Self as SimpleEnumSchema>::simple_enum_schema(r#gen)
+    }
 }
 
 /// Input structure for agent tool calls. This serves as the generic schema
@@ -76,22 +221,42 @@ pub struct AgentInput {
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
 #[tool_description_file = "crates/forge_domain/src/tools/descriptions/task.md"]
 pub struct TaskInput {
-    /// A list of clear and detailed descriptions of the tasks to be performed
-    /// by the agent in parallel. Provide sufficient context and specific
-    /// requirements to enable the agent to understand and execute the work
-    /// accurately.
+    /// Self-contained prompts, one per worker; they run in parallel (required
+    /// to start workers).
+    #[serde(default)]
     pub tasks: Vec<String>,
 
-    /// The ID of the specialized agent to delegate to (e.g., "forge", "muse",
-    /// "sage")
+    /// The agent the workers run as (required to start workers).
+    #[serde(default)]
     pub agent_id: String,
 
-    /// Optional session ID to continue an existing agent session. If not
-    /// provided, a new stateless session will be created. Use this to
-    /// maintain context across multiple task invocations with the same
-    /// agent.
+    /// Resume an earlier worker session (one task only). An unknown id is an
+    /// error.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+
+    /// Run the workers in the background and return a handle at once.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub background: bool,
+
+    /// Model the workers run on instead of the agent's configured model. Leave
+    /// unset unless the user asks for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    /// run (default), poll, wait or kill; poll/wait/kill act on a background
+    /// task's handle.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub action: ShellAction,
+
+    /// Handle of a background task (default: your most recent running one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
+
+    /// Seconds a wait blocks (default: until the task ends).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub timeout: Option<u64>,
 }
 
 fn default_true() -> bool {
@@ -188,7 +353,8 @@ impl Todo {
     }
 }
 
-/// Optional line range for partial file reads.
+/// Optional range for partial file reads: a line range or a byte range, not
+/// both.
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[schemars(deny_unknown_fields)]
 pub struct FSReadRange {
@@ -199,39 +365,59 @@ pub struct FSReadRange {
     /// Inclusive 1-based last line.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_line: Option<i32>,
+
+    /// 0-based byte offset of the first byte to read (byte range).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_byte: Option<u64>,
+
+    /// 0-based offset one past the last byte to read (byte range).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_byte: Option<u64>,
+}
+
+impl FSReadRange {
+    /// Whether a line bound is given.
+    pub fn is_line_range(&self) -> bool {
+        self.start_line.is_some() || self.end_line.is_some()
+    }
+
+    /// Whether a byte bound is given.
+    pub fn is_byte_range(&self) -> bool {
+        self.start_byte.is_some() || self.end_byte.is_some()
+    }
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
 #[tool_description_file = "crates/forge_domain/src/tools/descriptions/fs_read.md"]
 #[schemars(deny_unknown_fields)]
 pub struct FSRead {
-    /// Absolute path to the file to read.
+    /// Path of the file to read.
     #[serde(alias = "path")]
     pub file_path: String,
 
-    /// Optional line range for partial reads.
+    /// Optional line range (`start_line`/`end_line`) or byte range
+    /// (`start_byte`/`end_byte`) for partial reads.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range: Option<FSReadRange>,
 
-    /// If true, prefixes each line with its line index (starting at 1).
-    /// Defaults to true.
+    /// If true, prefixes each line with its line number. Defaults to true.
     #[serde(default = "default_true")]
     pub show_line_numbers: bool,
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
 #[tool_description_file = "crates/forge_domain/src/tools/descriptions/fs_write.md"]
+#[schemars(deny_unknown_fields)]
 pub struct FSWrite {
-    /// The absolute path to the file to write (must be absolute, not relative)
+    /// Path of the file to create or replace.
     #[serde(alias = "path")]
     pub file_path: String,
 
-    /// The content to write to the file
+    /// The complete file content to write.
     pub content: String,
 
-    /// If set to true, existing files will be overwritten. If not set and the
-    /// file exists, an error will be returned with the content of the
-    /// existing file.
+    /// Required to replace an existing file; the file must have been read
+    /// first and must not have changed since.
     #[serde(default)]
     #[serde(skip_serializing_if = "is_default")]
     pub overwrite: bool,
@@ -241,70 +427,71 @@ pub struct FSWrite {
 #[tool_description_file = "crates/forge_domain/src/tools/descriptions/fs_search.md"]
 #[derive(Default)]
 pub struct FSSearch {
-    /// The regular expression pattern to search for in file contents.
+    /// Regex to search file contents for.
     pub pattern: String,
 
-    /// File or directory to search in (rg PATH). Defaults to current working
-    /// directory.
+    /// File or directory to search (default: the current directory).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
 
-    /// Glob pattern to filter files (e.g. "*.js", "*.{ts,tsx}") - maps to rg
-    /// --glob
+    /// Glob filter on paths (e.g. "*.rs", "*.{ts,tsx}", "!*.min.js").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub glob: Option<String>,
 
-    /// Output mode: "content" shows matching lines (supports -A/-B/-C context,
-    /// -n line numbers, head_limit), "files_with_matches" shows file paths
-    /// (supports head_limit), "count" shows match counts (supports head_limit).
-    /// Defaults to "files_with_matches".
+    /// "content" (matching lines), "files_with_matches" (paths, default) or
+    /// "count" (matches per file).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_mode: Option<OutputMode>,
 
-    /// Number of lines to show before each match (rg -B). Requires output_mode:
-    /// "content", ignored otherwise.
-    #[serde(rename = "-B", skip_serializing_if = "Option::is_none")]
-    pub before_context: Option<u32>,
+    /// Lines of context before each match (content mode).
+    #[serde(alias = "-B", skip_serializing_if = "Option::is_none")]
+    pub context_before: Option<u32>,
 
-    /// Number of lines to show after each match (rg -A). Requires output_mode:
-    /// "content", ignored otherwise.
-    #[serde(rename = "-A", skip_serializing_if = "Option::is_none")]
-    pub after_context: Option<u32>,
+    /// Lines of context after each match (content mode).
+    #[serde(alias = "-A", skip_serializing_if = "Option::is_none")]
+    pub context_after: Option<u32>,
 
-    /// Number of lines to show before and after each match (rg -C). Requires
-    /// output_mode: "content", ignored otherwise.
-    #[serde(rename = "-C", skip_serializing_if = "Option::is_none")]
+    /// Lines of context before and after each match (content mode).
+    #[serde(alias = "-C", skip_serializing_if = "Option::is_none")]
     pub context: Option<u32>,
 
-    /// Show line numbers in output (rg -n). Requires output_mode: "content",
-    /// ignored otherwise.
-    #[serde(rename = "-n", skip_serializing_if = "Option::is_none")]
-    pub show_line_numbers: Option<bool>,
+    /// Prefix content lines with their line numbers (default true).
+    #[serde(alias = "-n", skip_serializing_if = "Option::is_none")]
+    pub line_numbers: Option<bool>,
 
-    /// Case insensitive search (rg -i)
-    #[serde(rename = "-i", skip_serializing_if = "Option::is_none")]
+    /// Match without case sensitivity.
+    #[serde(alias = "-i", skip_serializing_if = "Option::is_none")]
     pub case_insensitive: Option<bool>,
 
-    /// File type to search (rg --type). Common types: js, py, rust, go, java,
-    /// etc. More efficient than include for standard file types.
-    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    /// File type, e.g. rust, py, js (ripgrep type names).
+    #[serde(alias = "type", skip_serializing_if = "Option::is_none")]
     pub file_type: Option<String>,
 
-    /// Limit output to first N lines/entries, equivalent to "| head -N". Works
-    /// across all output modes: content (limits output lines),
-    /// files_with_matches (limits file paths), count (limits count entries).
-    /// When unspecified, shows all results from ripgrep.
+    /// Maximum result entries after `offset`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
     pub head_limit: Option<u32>,
 
-    /// Skip first N lines/entries before applying head_limit
+    /// Result entries to skip before `head_limit`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offset: Option<u32>,
 
-    /// Enable multiline mode where . matches newlines and patterns can span
-    /// lines (rg -U --multiline-dotall). Default: false.
+    /// Let the regex span lines (`.` matches newlines).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub multiline: Option<bool>,
+}
+
+impl FSSearch {
+    /// ripgrep spellings accepted on input and their schema names. They stay
+    /// out of the schema; the executor rewrites them before validation.
+    pub const ARGUMENT_ALIASES: [(&'static str, &'static str); 6] = [
+        ("-A", "context_after"),
+        ("-B", "context_before"),
+        ("-C", "context"),
+        ("-n", "line_numbers"),
+        ("-i", "case_insensitive"),
+        ("type", "file_type"),
+    ];
 }
 
 /// Output mode for search results
@@ -319,166 +506,23 @@ pub enum OutputMode {
     Count,
 }
 
-/// A paired query and use_case for semantic search. Each query must have a
-/// corresponding use_case for document reranking.
-#[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct SearchQuery {
-    /// The semantic embedding query that describes WHAT the code does or its
-    /// purpose. This query is converted to a vector embedding and used to find
-    /// semantically similar code chunks in the vector database.
-    ///
-    /// **Guidelines for effective embedding queries:**
-    /// - Use specific, targeted technical terms and domain concepts
-    /// - Describe behavior, functionality, patterns, or implementation approach
-    /// - Include concrete keywords like technology names, algorithms, data
-    ///   structures
-    /// - Balance specificity (focused results) with generality (avoid missing
-    ///   relevant code)
-    /// - Keep queries focused - overly broad queries cause timeouts and poor
-    ///   results
-    /// - **Align keywords with intent**: For documentation, use "README",
-    ///   "guide", "setup"; for implementation, use "function", "logic",
-    ///   "handler"
-    ///
-    /// **Good examples:**
-    /// - "exponential backoff retry mechanism with configurable delays"
-    /// - "streaming LLM responses with SSE chunked transfer encoding"
-    /// - "OAuth2 token refresh with automatic retry and expiry check"
-    /// - "Diesel database migration runner with transaction support"
-    /// - "semantic search reranker using cross-encoder model"
-    /// - "README documentation configuration setup semantic search"
-    /// - "markdown guide API documentation tool definitions"
-    ///
-    /// **Bad examples:**
-    /// - "retry" (too generic, will match everything)
-    /// - "authentication" (overly broad - specify what aspect: login, tokens,
-    ///   middleware?)
-    /// - "tool definitions schemas" (too vague - be more specific about
-    ///   structure or location)
-    /// - "how system works" (meta-question, not searchable concept)
-    /// - "function that validates" (focus on what it validates, not that it's a
-    ///   function)
-    pub query: String,
-
-    /// The reranking query that describes your INTENT and WHY you need this
-    /// code. This query is used by the reranker model to filter and
-    /// prioritize the most relevant results from the initial embedding
-    /// search based on your specific use case.
-    ///
-    /// **Purpose:** While `query` casts a wide net for similar code, `use_case`
-    /// narrows it down by intent: implementation vs docs vs tests, reading
-    /// vs modifying code, understanding architecture vs finding bugs, etc.
-    ///
-    /// **Guidelines for effective reranking queries:**
-    /// - **MANDATORY FOR CODE**: ALWAYS include codebase construct keywords
-    ///   (struct, trait, impl, interface, class, function, fn, definition,
-    ///   implementation, declaration, type) when searching for code
-    /// - **WHY CRITICAL**: The reranker gives HIGH WEIGHTAGE to these keywords
-    ///   - "struct" → prioritizes struct definitions
-    ///   - "trait impl" → prioritizes trait implementations
-    ///   - "function" / "fn" → prioritizes function definitions
-    ///   - Without these, you get documentation instead of code!
-    /// - Clearly state your goal: understand, modify, debug, find examples,
-    ///   etc.
-    /// - Specify the TYPE of code you need: implementation, tests, docs,
-    ///   config, architecture
-    /// - Include WHY context: "to fix a bug", "to add a feature", "to
-    ///   understand flow"
-    /// - Be explicit about what to AVOID: "not tests", "not documentation",
-    ///   "not examples"
-    /// - **Match intent to file types**: documentation intent → avoid
-    ///   requesting "implementation code"; implementation intent → avoid
-    ///   requesting "documentation"
-    /// - Keep it concise (1-2 sentences) but informative
-    /// - MUST be different from the embedding query - add intent/context
-    ///
-    /// **Good examples (ALWAYS include construct keywords):**
-    /// - "I need the struct definition and trait implementation for Diesel
-    ///   migrations to understand the transaction handling, not setup docs"
-    /// - "Show me the function implementation for semantic search reranker so I
-    ///   can modify it to support file type filtering"
-    /// - "Find the type declarations and interface definitions for the tool
-    ///   registry, not the usage examples"
-    /// - "I'm debugging a timeout issue and need the function implementation
-    ///   that handles streaming responses, not the API documentation"
-    /// - "Show me the struct definitions and trait implementations for
-    ///   authentication, not the setup guide"
-    /// - "I need the impl block for workspace sync to understand how it detects
-    ///   file changes"
-    /// - "Find the fn definitions for embedding generation batching logic"
-    /// - "I need documentation explaining how to configure semantic search, not
-    ///   the implementation code"
-    /// - "Find the README or setup guide that explains the tool registration
-    ///   process, avoiding implementation details"
-    ///
-    /// **Bad examples (missing construct keywords = FAILS):**
-    /// - "I need code that handles authentication" ❌ MISSING:
-    ///   struct/trait/impl/function
-    /// - "Show me the database logic" ❌ MISSING: trait/impl/function keywords
-    /// - "I need the workspace sync implementation" ❌ MISSING: struct/impl/fn
-    ///   - too generic
-    /// - "Find the reranker code" ❌ MISSING: struct/trait/impl/function
-    /// - "exponential backoff retry mechanism" ❌ MISSING: WHY + construct
-    ///   keywords
-    /// - "find authentication code" ❌ MISSING: which construct? struct? trait?
-    ///   impl?
-    /// - "tool definitions" ❌ MISSING: struct? trait? type? be specific
-    /// - "how it works" (too vague - specify what you want to understand)
-    /// - Long rambling explanation without clear intent (keep it focused)
-    pub use_case: String,
-}
-
-impl SearchQuery {
-    /// Creates a new search query with the given query and use_case
-    pub fn new(query: impl Into<String>, use_case: impl Into<String>) -> Self {
-        Self { query: query.into(), use_case: use_case.into() }
-    }
-}
-
-#[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
-#[tool_description_file = "crates/forge_domain/src/tools/descriptions/semantic_search.md"]
-pub struct SemanticSearch {
-    /// List of search queries to execute in parallel. Using multiple queries
-    /// (2-3) with varied phrasings significantly improves results - each query
-    /// captures different aspects of what you're looking for. Each query pairs
-    /// a search term with a use_case for reranking. Example: for
-    /// authentication, try "user login verification", "token generation",
-    /// "OAuth flow".
-    pub queries: Vec<SearchQuery>,
-}
-
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
 #[tool_description_file = "crates/forge_domain/src/tools/descriptions/fs_remove.md"]
+#[schemars(deny_unknown_fields)]
 pub struct FSRemove {
-    /// The path of the file to remove (absolute path required)
+    /// Path of the file, directory or symlink to remove.
     pub path: String,
+
+    /// Delete directly instead of moving to the trash (default false).
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub permanent: bool,
 }
 
-/// Operation types that can be performed on matched text
-#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, AsRefStr, EnumIter)]
-#[serde(rename_all = "snake_case")]
-pub enum PatchOperation {
-    /// Prepend content before the matched text
-    #[default]
-    Prepend,
-
-    /// Append content after the matched text
-    Append,
-
-    /// Should be used only when you want to replace the first occurrence.
-    /// Use only for specific, targeted replacements where you need to modify
-    /// just the first match.
-    Replace,
-
-    /// Should be used for renaming variables, functions, types, or any
-    /// widespread replacements across the file. This is the recommended
-    /// choice for consistent refactoring operations as it ensures all
-    /// occurrences are updated.
-    ReplaceAll,
-
-    /// Swap the matched text with another text (search for the second text and
-    /// swap them)
-    Swap,
+impl FSRemove {
+    /// Creates a trash-mode remove input for `path`.
+    pub fn new(path: impl Into<String>) -> Self {
+        Self { path: path.into(), permanent: false }
+    }
 }
 
 /// Helper trait to generate simple string enum schemas for unit enums.
@@ -514,16 +558,6 @@ trait SimpleEnumSchema: AsRef<str> + IntoEnumIterator {
 // IntoEnumIterator
 impl<T> SimpleEnumSchema for T where T: AsRef<str> + IntoEnumIterator {}
 
-impl JsonSchema for PatchOperation {
-    fn schema_name() -> Cow<'static, str> {
-        <Self as SimpleEnumSchema>::simple_enum_schema_name()
-    }
-
-    fn json_schema(r#gen: &mut schemars::generate::SchemaGenerator) -> Schema {
-        <Self as SimpleEnumSchema>::simple_enum_schema(r#gen)
-    }
-}
-
 impl JsonSchema for OutputMode {
     fn schema_name() -> Cow<'static, str> {
         <Self as SimpleEnumSchema>::simple_enum_schema_name()
@@ -534,153 +568,328 @@ impl JsonSchema for OutputMode {
     }
 }
 
+/// Input for the `patch` tool: either the scalar form (`old_string`,
+/// `new_string`, `replace_all`) or the batch form (`edits`), never both.
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
 #[tool_description_file = "crates/forge_domain/src/tools/descriptions/fs_patch.md"]
+#[schemars(deny_unknown_fields)]
 pub struct FSPatch {
-    /// The absolute path to the file to modify
+    /// Path of the file to modify.
     #[serde(alias = "path")]
     pub file_path: String,
 
-    /// The text to replace
+    /// Exact text to replace (scalar form).
+    #[serde(default, alias = "search", skip_serializing_if = "Option::is_none")]
+    pub old_string: Option<String>,
+
+    /// Replacement text; must differ from old_string (scalar form).
+    #[serde(default, alias = "content", skip_serializing_if = "Option::is_none")]
+    pub new_string: Option<String>,
+
+    /// Replace every occurrence of old_string instead of requiring exactly
+    /// one (scalar form, default false).
+    #[serde(default, skip_serializing_if = "is_default")]
+    #[schemars(default)]
+    pub replace_all: bool,
+
+    /// Several replacements applied in order, each seeing the previous
+    /// result. Never combined with the scalar form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1))]
+    pub edits: Option<Vec<PatchEdit>>,
+}
+
+impl FSPatch {
+    /// Creates a scalar-form patch input.
+    ///
+    /// # Arguments
+    /// * `file_path` - Path of the file to modify.
+    /// * `old_string` - Exact text to replace.
+    /// * `new_string` - Replacement text.
+    pub fn new(
+        file_path: impl Into<String>,
+        old_string: impl Into<String>,
+        new_string: impl Into<String>,
+    ) -> Self {
+        Self {
+            file_path: file_path.into(),
+            old_string: Some(old_string.into()),
+            new_string: Some(new_string.into()),
+            replace_all: false,
+            edits: None,
+        }
+    }
+
+    /// Creates a batch-form patch input.
+    ///
+    /// # Arguments
+    /// * `file_path` - Path of the file to modify.
+    /// * `edits` - Edits applied in order.
+    pub fn batch(file_path: impl Into<String>, edits: Vec<PatchEdit>) -> Self {
+        Self {
+            file_path: file_path.into(),
+            old_string: None,
+            new_string: None,
+            replace_all: false,
+            edits: Some(edits),
+        }
+    }
+
+    /// Sets the scalar `replace_all` flag.
+    pub fn replace_all(mut self, replace_all: bool) -> Self {
+        self.replace_all = replace_all;
+        self
+    }
+
+    /// Resolves the input into the ordered list of edits to apply.
+    ///
+    /// # Errors
+    /// Returns an error when both forms are given, when neither form is
+    /// complete, or when `edits` is empty.
+    pub fn resolve_edits(&self) -> anyhow::Result<Vec<PatchEdit>> {
+        match &self.edits {
+            Some(_)
+                if self.old_string.is_some() || self.new_string.is_some() || self.replace_all =>
+            {
+                anyhow::bail!(
+                    "pass either the scalar form (old_string/new_string/replace_all) or edits, not both"
+                )
+            }
+            Some(edits) if edits.is_empty() => {
+                anyhow::bail!(
+                    "edits must be a non-empty list of {{old_string, new_string}} objects"
+                )
+            }
+            Some(edits) => Ok(edits.clone()),
+            None => match (&self.old_string, &self.new_string) {
+                (Some(old_string), Some(new_string)) => Ok(vec![PatchEdit {
+                    old_string: old_string.clone(),
+                    new_string: new_string.clone(),
+                    replace_all: self.replace_all,
+                }]),
+                _ => anyhow::bail!("old_string and new_string are required (or pass edits)"),
+            },
+        }
+    }
+
+    /// Whether the call uses the batch (`edits`) form.
+    pub fn is_batch(&self) -> bool {
+        self.edits.is_some()
+    }
+}
+
+/// A single replacement inside a batch `patch` call.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[schemars(deny_unknown_fields)]
+pub struct PatchEdit {
+    /// Exact text to replace.
     #[serde(alias = "search")]
     pub old_string: String,
 
-    /// The text to replace it with (must be different from old_string)
+    /// Replacement text; must differ from old_string.
     #[serde(alias = "content")]
     pub new_string: String,
 
-    /// Replace all occurrences of old_string (default false)
+    /// Replace every occurrence of old_string instead of requiring exactly
+    /// one (default false).
     #[serde(default)]
     #[schemars(default)]
     pub replace_all: bool,
 }
 
-/// A single edit operation in a multi-patch
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
-pub struct PatchEdit {
-    /// The text to replace
-    pub old_string: String,
+impl PatchEdit {
+    /// Creates a single-occurrence edit.
+    ///
+    /// # Arguments
+    /// * `old_string` - Exact text to replace.
+    /// * `new_string` - Replacement text.
+    pub fn new(old_string: impl Into<String>, new_string: impl Into<String>) -> Self {
+        Self {
+            old_string: old_string.into(),
+            new_string: new_string.into(),
+            replace_all: false,
+        }
+    }
 
-    /// The text to replace it with (must be different from old_string)
-    pub new_string: String,
-
-    /// Replace all occurrences of old_string (default false)
-    #[serde(default)]
-    #[schemars(default)]
-    pub replace_all: bool,
-}
-
-#[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
-#[tool_description_file = "crates/forge_domain/src/tools/descriptions/fs_multi_patch.md"]
-pub struct FSMultiPatch {
-    /// The absolute path to the file to modify
-    pub file_path: String,
-
-    /// Array of edit operations to perform sequentially on the file
-    pub edits: Vec<PatchEdit>,
+    /// Sets the `replace_all` flag.
+    pub fn replace_all(mut self, replace_all: bool) -> Self {
+        self.replace_all = replace_all;
+        self
+    }
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
 #[tool_description_file = "crates/forge_domain/src/tools/descriptions/fs_undo.md"]
+#[schemars(deny_unknown_fields)]
 pub struct FSUndo {
-    /// The absolute path of the file to revert to its previous state.
+    /// Path whose latest snapshot should be restored.
     pub path: String,
+}
+
+/// What a `shell` call does.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellAction {
+    /// Start `command` and wait up to `timeout` seconds for it.
+    #[default]
+    Run,
+    /// Report a running job's new output without waiting.
+    Poll,
+    /// Wait up to `timeout` more seconds for a running job.
+    Wait,
+    /// Stop a running job (SIGTERM, then SIGKILL, to its process group).
+    Kill,
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
 #[tool_description_file = "crates/forge_domain/src/tools/descriptions/shell.md"]
 pub struct Shell {
-    /// The shell command to execute.
+    /// The command to run (required for action "run").
+    #[serde(default)]
     pub command: String,
 
-    /// The working directory where the command should be executed.
-    /// If not specified, defaults to the current working directory from the
-    /// environment.
+    /// Working directory for the command (default: the current directory).
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
 
-    /// Whether to preserve ANSI escape codes in the output.
-    /// If true, ANSI escape codes will be preserved in the output.
-    /// If false (default), ANSI escape codes will be stripped from the output.
+    /// Keep ANSI escape codes in the output (default false).
     #[serde(default)]
     #[serde(skip_serializing_if = "is_default")]
     pub keep_ansi: bool,
 
-    /// Environment variable names to pass to command execution (e.g., ["PATH",
-    /// "HOME", "USER"]). The system automatically reads the specified
-    /// values and applies them during command execution.
+    /// Extra environment variable names to pass through, on top of the
+    /// configured allow-list.
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<Vec<String>>,
 
-    /// Clear, concise description of what this command does. Recommended to be
-    /// 5-10 words for simple commands. For complex commands with pipes or
-    /// multiple operations, provide more context. Examples: "Lists files in
-    /// current directory", "Installs package dependencies", "Compiles Rust
-    /// project with release optimizations".
+    /// Short description of what the command does.
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+
+    /// run (default), poll, wait or kill.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "is_default")]
+    pub action: ShellAction,
+
+    /// Job id from a `HANDLE n RUNNING` line, for poll/wait/kill (default:
+    /// the most recent running job).
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
+
+    /// Seconds to wait before returning a handle (run) or to keep waiting
+    /// (wait); default 30. The command is never killed when the window ends.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub timeout: Option<u64>,
+}
+
+/// Input for the `ast_search` tool: structural search and rewrite.
+#[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
+#[tool_description_file = "crates/forge_domain/src/tools/descriptions/ast_search.md"]
+pub struct AstSearch {
+    /// ast-grep pattern; `$NAME` matches one node, `$$$NAME` zero or more.
+    pub pattern: String,
+
+    /// Language (e.g. rust, python, typescript, tsx, go, c, cpp); inferred
+    /// from each file's extension when omitted.
+    #[serde(default, alias = "lang", skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+
+    /// File or directory to search (default: the current directory).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+
+    /// Replacement template using the pattern's metavariables; without
+    /// `apply` the result is a diff and nothing is written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewrite: Option<String>,
+
+    /// Write the rewrite (default false).
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub apply: bool,
+
+    /// Most matches reported (default 200); an apply with more matches is
+    /// refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub max_results: Option<u32>,
 }
 
 /// Input type for the net fetch tool
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
 #[tool_description_file = "crates/forge_domain/src/tools/descriptions/net_fetch.md"]
 pub struct NetFetch {
-    /// URL to fetch
+    /// URL to fetch: http(s):// or file://.
     pub url: String,
 
-    /// Get raw content without any markdown conversion (default: false)
+    /// Return the body as is, without HTML-to-markdown conversion (default
+    /// false).
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw: Option<bool>,
+
+    /// HTTP method (default GET).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+
+    /// Request headers, name to value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<std::collections::BTreeMap<String, String>>,
+
+    /// Request body text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+
+    /// Request body as JSON (sets Content-Type: application/json); not with
+    /// `body`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<serde_json::Map<String, serde_json::Value>>")]
+    pub json_body: Option<serde_json::Value>,
+
+    /// Stream the response body to this path instead of returning it; no size
+    /// limit, resumable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save: Option<String>,
 }
 
-#[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
-#[tool_description_file = "crates/forge_domain/src/tools/descriptions/followup.md"]
-pub struct Followup {
-    /// Question to ask the user
-    pub question: String,
+impl NetFetch {
+    /// Creates a GET request for `url`.
+    pub fn new(url: impl Into<String>) -> Self {
+        Self { url: url.into(), ..Default::default() }
+    }
 
-    /// If true, allows selecting multiple options; if false (default), only one
-    /// option can be selected
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub multiple: Option<bool>,
-
-    /// First option to choose from
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub option1: Option<String>,
-
-    /// Second option to choose from
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub option2: Option<String>,
-
-    /// Third option to choose from
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub option3: Option<String>,
-
-    /// Fourth option to choose from
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub option4: Option<String>,
-
-    /// Fifth option to choose from
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub option5: Option<String>,
+    /// The request method, upper-cased (default GET).
+    pub fn method(&self) -> String {
+        self.method
+            .as_deref()
+            .map(|m| m.trim().to_uppercase())
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| "GET".to_string())
+    }
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
 #[tool_description_file = "crates/forge_domain/src/tools/descriptions/plan_create.md"]
 pub struct PlanCreate {
-    /// The name of the plan (will be used in the filename)
+    /// The name of the plan (sanitised into the filename).
     pub plan_name: String,
 
-    /// The version of the plan (e.g., "v1", "v2", "1.0")
+    /// The version of the plan (e.g., "v1", "v2", "1.0"; sanitised into the
+    /// filename).
     pub version: String,
 
-    /// The content to write to the plan file. This should be the complete
-    /// plan content in markdown format.
+    /// The complete plan content in markdown, written verbatim.
     pub content: String,
+
+    /// Replace an existing plan with the same name and version (default
+    /// false).
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub overwrite: bool,
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize, JsonSchema, ToolDescription, PartialEq)]
@@ -812,12 +1021,10 @@ impl ToolDescription for ToolCatalog {
     fn description(&self) -> String {
         match self {
             ToolCatalog::Patch(v) => v.description(),
-            ToolCatalog::MultiPatch(v) => v.description(),
             ToolCatalog::Shell(v) => v.description(),
-            ToolCatalog::Followup(v) => v.description(),
             ToolCatalog::Fetch(v) => v.description(),
             ToolCatalog::FsSearch(v) => v.description(),
-            ToolCatalog::SemSearch(v) => v.description(),
+            ToolCatalog::AstSearch(v) => v.description(),
             ToolCatalog::Read(v) => v.description(),
             ToolCatalog::Remove(v) => v.description(),
             ToolCatalog::Undo(v) => v.description(),
@@ -827,6 +1034,29 @@ impl ToolDescription for ToolCatalog {
             ToolCatalog::TodoWrite(v) => v.description(),
             ToolCatalog::TodoRead(v) => v.description(),
             ToolCatalog::Task(v) => v.description(),
+            ToolCatalog::ToolDiscovery(v) => v.description(),
+            ToolCatalog::McpResourceList(_)
+            | ToolCatalog::McpResourceTemplates(_)
+            | ToolCatalog::McpResourceRead(_)
+            | ToolCatalog::McpResourceSubscribe(_)
+            | ToolCatalog::McpResourceUnsubscribe(_)
+            | ToolCatalog::McpPromptList(_)
+            | ToolCatalog::McpPromptGet(_) => self.mcp_control_description().unwrap_or_default(),
+            ToolCatalog::TerminalSession(v) => v.description(),
+            ToolCatalog::TerminalSnapshot(v) => v.description(),
+            ToolCatalog::Lsp(v) => v.description(),
+            ToolCatalog::Kernel(v) => v.description(),
+            ToolCatalog::Toolbox(v) => v.description(),
+            ToolCatalog::Browse(v) => v.description(),
+            ToolCatalog::BrowserProbe(v) => v.description(),
+            ToolCatalog::SerperSearch(v) => v.description(),
+            ToolCatalog::TavilySearch(v) => v.description(),
+            ToolCatalog::ExaSearch(v) => v.description(),
+            ToolCatalog::DocsSearch(v) => v.description(),
+            ToolCatalog::NotebookEdit(v) => v.description(),
+            ToolCatalog::WikiConvert(v) => v.description(),
+            ToolCatalog::WikiWrite(v) => v.description(),
+            ToolCatalog::WikiFinishIngest(v) => v.description(),
         }
     }
 }
@@ -857,6 +1087,21 @@ fn normalize_tool_name(name: &ToolName) -> ToolName {
         .unwrap_or_else(|| ToolName::new(trimmed))
 }
 
+/// Sets `additionalProperties: false` on every object schema that declares
+/// `properties` and does not already say otherwise.
+fn close_object_schemas(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.contains_key("properties") && !map.contains_key("additionalProperties") {
+                map.insert("additionalProperties".to_string(), false.into());
+            }
+            map.values_mut().for_each(close_object_schemas);
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(close_object_schemas),
+        _ => {}
+    }
+}
+
 impl ToolCatalog {
     pub fn schema(&self) -> Schema {
         use schemars::generate::SchemaSettings;
@@ -872,12 +1117,10 @@ impl ToolCatalog {
 
         let mut schema = match self {
             ToolCatalog::Patch(_) => r#gen.into_root_schema_for::<FSPatch>(),
-            ToolCatalog::MultiPatch(_) => r#gen.into_root_schema_for::<FSMultiPatch>(),
             ToolCatalog::Shell(_) => r#gen.into_root_schema_for::<Shell>(),
-            ToolCatalog::Followup(_) => r#gen.into_root_schema_for::<Followup>(),
             ToolCatalog::Fetch(_) => r#gen.into_root_schema_for::<NetFetch>(),
             ToolCatalog::FsSearch(_) => r#gen.into_root_schema_for::<FSSearch>(),
-            ToolCatalog::SemSearch(_) => r#gen.into_root_schema_for::<SemanticSearch>(),
+            ToolCatalog::AstSearch(_) => r#gen.into_root_schema_for::<AstSearch>(),
             ToolCatalog::Read(_) => r#gen.into_root_schema_for::<FSRead>(),
             ToolCatalog::Remove(_) => r#gen.into_root_schema_for::<FSRemove>(),
             ToolCatalog::Undo(_) => r#gen.into_root_schema_for::<FSUndo>(),
@@ -887,12 +1130,52 @@ impl ToolCatalog {
             ToolCatalog::Task(_) => r#gen.into_root_schema_for::<TaskInput>(),
             ToolCatalog::TodoWrite(_) => r#gen.into_root_schema_for::<TodoWrite>(),
             ToolCatalog::TodoRead(_) => r#gen.into_root_schema_for::<TodoRead>(),
+            ToolCatalog::ToolDiscovery(_) => r#gen.into_root_schema_for::<ToolDiscovery>(),
+            ToolCatalog::McpResourceList(_)
+            | ToolCatalog::McpResourceTemplates(_)
+            | ToolCatalog::McpPromptList(_) => r#gen.into_root_schema_for::<McpServerArg>(),
+            ToolCatalog::McpResourceRead(_)
+            | ToolCatalog::McpResourceSubscribe(_)
+            | ToolCatalog::McpResourceUnsubscribe(_) => {
+                r#gen.into_root_schema_for::<McpResourceArg>()
+            }
+            ToolCatalog::McpPromptGet(_) => r#gen.into_root_schema_for::<McpPromptArg>(),
+            ToolCatalog::TerminalSession(_) => r#gen.into_root_schema_for::<TerminalSession>(),
+            ToolCatalog::TerminalSnapshot(_) => r#gen.into_root_schema_for::<TerminalSnapshot>(),
+            ToolCatalog::Lsp(_) => r#gen.into_root_schema_for::<Lsp>(),
+            ToolCatalog::Kernel(_) => r#gen.into_root_schema_for::<Kernel>(),
+            ToolCatalog::Toolbox(_) => r#gen.into_root_schema_for::<Toolbox>(),
+            ToolCatalog::Browse(_) => r#gen.into_root_schema_for::<Browse>(),
+            ToolCatalog::BrowserProbe(_) => r#gen.into_root_schema_for::<BrowserProbe>(),
+            ToolCatalog::SerperSearch(_) => r#gen.into_root_schema_for::<SerperSearch>(),
+            ToolCatalog::TavilySearch(_) => r#gen.into_root_schema_for::<TavilySearch>(),
+            ToolCatalog::ExaSearch(_) => r#gen.into_root_schema_for::<ExaSearch>(),
+            ToolCatalog::DocsSearch(_) => r#gen.into_root_schema_for::<DocsSearch>(),
+            ToolCatalog::NotebookEdit(_) => r#gen.into_root_schema_for::<NotebookEdit>(),
+            ToolCatalog::WikiConvert(_) => r#gen.into_root_schema_for::<WikiConvert>(),
+            ToolCatalog::WikiWrite(_) => r#gen.into_root_schema_for::<WikiWrite>(),
+            ToolCatalog::WikiFinishIngest(_) => r#gen.into_root_schema_for::<WikiFinishIngest>(),
         };
 
         // Apply transform to add nullable property and remove null from type
         AddNullable::default().transform(&mut schema);
 
+        // X2: every native tool schema is closed. Serde aliases (`path`,
+        // `search`, `content`, rg flags) stay out of the schema; the executor
+        // validates against it before deserialising.
+        if let Some(root) = schema.as_object_mut() {
+            if root.contains_key("properties") && !root.contains_key("additionalProperties") {
+                root.insert("additionalProperties".to_string(), false.into());
+            }
+            root.values_mut().for_each(close_object_schemas);
+        }
+
         schema
+    }
+
+    /// Tool definitions of every native tool.
+    pub fn iter_definitions() -> Vec<ToolDefinition> {
+        ToolCatalog::iter().map(|tool| tool.definition()).collect()
     }
 
     pub fn definition(&self) -> ToolDefinition {
@@ -904,13 +1187,6 @@ impl ToolCatalog {
         let normalized = normalize_tool_name(tool_name);
         FORGE_TOOLS.contains(&normalized)
     }
-    pub fn should_yield(tool_name: &ToolName) -> bool {
-        // Tools that convey that the execution should yield
-        let normalized = normalize_tool_name(tool_name);
-        [ToolKind::Followup]
-            .iter()
-            .any(|v| v.to_string().to_case(Case::Snake).eq(normalized.as_str()))
-    }
 
     pub fn requires_stdout(tool_name: &ToolName) -> bool {
         // Tools that require direct stdout/stderr access
@@ -918,6 +1194,63 @@ impl ToolCatalog {
         [ToolKind::Shell]
             .iter()
             .any(|v| v.to_string().to_case(Case::Snake).eq(normalized.as_str()))
+    }
+
+    /// X6: whether this call writes nothing, so it may run in parallel with
+    /// other read-only calls. Anything that mutates files, runs processes or
+    /// changes session state is a barrier. A fetch is read-only only as a GET
+    /// or HEAD that saves nothing.
+    pub fn is_read_only(&self) -> bool {
+        match self {
+            ToolCatalog::Fetch(input) => {
+                matches!(input.method().as_str(), "GET" | "HEAD") && input.save.is_none()
+            }
+            ToolCatalog::AstSearch(input) => !input.apply,
+            ToolCatalog::Read(_)
+            | ToolCatalog::FsSearch(_)
+            | ToolCatalog::Skill(_)
+            | ToolCatalog::TodoRead(_)
+            | ToolCatalog::McpResourceList(_)
+            | ToolCatalog::McpResourceTemplates(_)
+            | ToolCatalog::McpResourceRead(_)
+            | ToolCatalog::McpPromptList(_)
+            | ToolCatalog::McpPromptGet(_)
+            | ToolCatalog::TerminalSnapshot(_)
+            | ToolCatalog::Lsp(_)
+            | ToolCatalog::Browse(_)
+            | ToolCatalog::SerperSearch(_)
+            | ToolCatalog::TavilySearch(_)
+            | ToolCatalog::ExaSearch(_)
+            | ToolCatalog::DocsSearch(_)
+            | ToolCatalog::WikiConvert(_) => true,
+            ToolCatalog::Toolbox(input) => matches!(
+                input.action.as_deref().unwrap_or("list"),
+                "list" | "show" | "history"
+            ),
+            _ => false,
+        }
+    }
+
+    /// X7: whether the tool bounds its own run time (window, timeout or
+    /// protocol limit), so the executor's blanket backstop does not apply.
+    pub fn has_own_timeout(&self) -> bool {
+        matches!(
+            self,
+            ToolCatalog::Task(_)
+                | ToolCatalog::Shell(_)
+                | ToolCatalog::Fetch(_)
+                | ToolCatalog::McpResourceList(_)
+                | ToolCatalog::McpResourceTemplates(_)
+                | ToolCatalog::McpResourceRead(_)
+                | ToolCatalog::McpResourceSubscribe(_)
+                | ToolCatalog::McpResourceUnsubscribe(_)
+                | ToolCatalog::McpPromptList(_)
+                | ToolCatalog::McpPromptGet(_)
+                | ToolCatalog::Kernel(_)
+                | ToolCatalog::TerminalSession(_)
+                | ToolCatalog::Browse(_)
+                | ToolCatalog::BrowserProbe(_)
+        )
     }
 
     /// Convert a tool input to its corresponding domain operation for policy
@@ -976,25 +1309,41 @@ impl ToolCatalog {
                     message,
                 })
             }
+            ToolCatalog::AstSearch(input) => {
+                let path = input.path.as_deref().unwrap_or(".");
+                let message = format!(
+                    "Structural {} in {}: {}",
+                    if input.apply { "rewrite" } else { "search" },
+                    display_path_for(path),
+                    input.pattern
+                );
+                let path = std::path::PathBuf::from(path);
+                Some(if input.apply {
+                    crate::policies::PermissionOperation::Write { path, cwd, message }
+                } else {
+                    crate::policies::PermissionOperation::Read { path, cwd, message }
+                })
+            }
             ToolCatalog::Remove(input) => Some(crate::policies::PermissionOperation::Write {
                 path: std::path::PathBuf::from(&input.path),
                 cwd,
                 message: format!("Remove file: {}", display_path_for(&input.path)),
             }),
-            ToolCatalog::Patch(input) => Some(crate::policies::PermissionOperation::Write {
-                path: std::path::PathBuf::from(&input.file_path),
-                cwd,
-                message: format!("Modify file: {}", display_path_for(&input.file_path)),
-            }),
-            ToolCatalog::MultiPatch(input) => Some(crate::policies::PermissionOperation::Write {
-                path: std::path::PathBuf::from(&input.file_path),
-                cwd,
-                message: format!(
-                    "Modify file with {} edits: {}",
-                    input.edits.len(),
-                    display_path_for(&input.file_path)
-                ),
-            }),
+            ToolCatalog::Patch(input) => {
+                let message = match &input.edits {
+                    Some(edits) => format!(
+                        "Modify file with {} edits: {}",
+                        edits.len(),
+                        display_path_for(&input.file_path)
+                    ),
+                    None => format!("Modify file: {}", display_path_for(&input.file_path)),
+                };
+                Some(crate::policies::PermissionOperation::Write {
+                    path: std::path::PathBuf::from(&input.file_path),
+                    cwd,
+                    message,
+                })
+            }
             ToolCatalog::Shell(input) => Some(crate::policies::PermissionOperation::Execute {
                 command: input.command.clone(),
                 cwd,
@@ -1004,14 +1353,95 @@ impl ToolCatalog {
                 cwd,
                 message: format!("Fetch content from URL: {}", input.url),
             }),
+            ToolCatalog::TerminalSession(input) => input.command.as_ref().map(|command| {
+                crate::policies::PermissionOperation::Execute { command: command.clone(), cwd }
+            }),
+            ToolCatalog::Kernel(input) => {
+                input
+                    .code
+                    .as_ref()
+                    .map(|code| crate::policies::PermissionOperation::Execute {
+                        command: code.clone(),
+                        cwd,
+                    })
+            }
+            ToolCatalog::Browse(input) => Some(crate::policies::PermissionOperation::Fetch {
+                url: input.url.clone(),
+                cwd,
+                message: format!("Render page: {}", input.url),
+            }),
+            ToolCatalog::BrowserProbe(input) => Some(crate::policies::PermissionOperation::Fetch {
+                url: input.target.clone(),
+                cwd,
+                message: format!("Probe page in Chromium: {}", input.target),
+            }),
+            ToolCatalog::SerperSearch(input) => Some(crate::policies::PermissionOperation::Fetch {
+                url: "https://google.serper.dev/search".to_string(),
+                cwd,
+                message: format!("Web search: {}", input.query),
+            }),
+            ToolCatalog::TavilySearch(input) => Some(crate::policies::PermissionOperation::Fetch {
+                url: "https://api.tavily.com/search".to_string(),
+                cwd,
+                message: format!("Web search: {}", input.query),
+            }),
+            ToolCatalog::ExaSearch(input) => Some(crate::policies::PermissionOperation::Fetch {
+                url: "https://api.exa.ai/search".to_string(),
+                cwd,
+                message: format!("Web search: {}", input.query),
+            }),
+            ToolCatalog::DocsSearch(input) => Some(crate::policies::PermissionOperation::Fetch {
+                url: "https://context7.com/api/v1/search".to_string(),
+                cwd,
+                message: format!("Library docs: {}", input.library),
+            }),
+            ToolCatalog::Lsp(input) => Some(crate::policies::PermissionOperation::Read {
+                path: std::path::PathBuf::from(&input.file_path),
+                cwd,
+                message: format!(
+                    "Language server {} on {}",
+                    input.operation,
+                    display_path_for(&input.file_path)
+                ),
+            }),
+            ToolCatalog::NotebookEdit(input) => Some(crate::policies::PermissionOperation::Write {
+                path: std::path::PathBuf::from(&input.file_path),
+                cwd,
+                message: format!("Edit notebook: {}", display_path_for(&input.file_path)),
+            }),
+            ToolCatalog::WikiConvert(input) => Some(crate::policies::PermissionOperation::Read {
+                path: std::path::PathBuf::from(&input.file_path),
+                cwd,
+                message: format!("Convert for wiki: {}", display_path_for(&input.file_path)),
+            }),
+            ToolCatalog::WikiWrite(input) => Some(crate::policies::PermissionOperation::Write {
+                path: std::path::PathBuf::from(&input.vault),
+                cwd,
+                message: format!("Write wiki page: {}", input.title),
+            }),
+            ToolCatalog::WikiFinishIngest(input) => {
+                Some(crate::policies::PermissionOperation::Write {
+                    path: std::path::PathBuf::from(&input.vault),
+                    cwd,
+                    message: format!("Finish wiki ingest: {}", input.source),
+                })
+            }
             // Operations that don't require permission checks
-            ToolCatalog::SemSearch(_)
-            | ToolCatalog::Undo(_)
-            | ToolCatalog::Followup(_)
+            ToolCatalog::Undo(_)
             | ToolCatalog::Plan(_)
             | ToolCatalog::Skill(_)
             | ToolCatalog::TodoWrite(_)
             | ToolCatalog::TodoRead(_)
+            | ToolCatalog::ToolDiscovery(_)
+            | ToolCatalog::TerminalSnapshot(_)
+            | ToolCatalog::Toolbox(_)
+            | ToolCatalog::McpResourceList(_)
+            | ToolCatalog::McpResourceTemplates(_)
+            | ToolCatalog::McpResourceRead(_)
+            | ToolCatalog::McpResourceSubscribe(_)
+            | ToolCatalog::McpResourceUnsubscribe(_)
+            | ToolCatalog::McpPromptList(_)
+            | ToolCatalog::McpPromptGet(_)
             | ToolCatalog::Task(_) => None,
         }
     }
@@ -1040,17 +1470,14 @@ impl ToolCatalog {
         search: &str,
         replace_all: bool,
     ) -> ToolCallFull {
-        ToolCallFull::from(ToolCatalog::Patch(FSPatch {
-            file_path: path.to_string(),
-            old_string: search.to_string(),
-            new_string: content.to_string(),
-            replace_all,
-        }))
+        ToolCallFull::from(ToolCatalog::Patch(
+            FSPatch::new(path, search, content).replace_all(replace_all),
+        ))
     }
 
     /// Creates a Remove tool call with the specified path
     pub fn tool_call_remove(path: &str) -> ToolCallFull {
-        ToolCallFull::from(ToolCatalog::Remove(FSRemove { path: path.to_string() }))
+        ToolCallFull::from(ToolCatalog::Remove(FSRemove::new(path)))
     }
 
     /// Creates a Shell tool call with the specified command and working
@@ -1072,11 +1499,6 @@ impl ToolCatalog {
         }))
     }
 
-    /// Creates a Semantic Search tool call with the specified queries
-    pub fn tool_call_semantic_search(queries: Vec<SearchQuery>) -> ToolCallFull {
-        ToolCallFull::from(ToolCatalog::SemSearch(SemanticSearch { queries }))
-    }
-
     /// Creates an Undo tool call with the specified path
     pub fn tool_call_undo(path: &str) -> ToolCallFull {
         ToolCallFull::from(ToolCatalog::Undo(FSUndo { path: path.to_string() }))
@@ -1090,14 +1512,6 @@ impl ToolCatalog {
         }))
     }
 
-    /// Creates a Followup tool call with the specified question
-    pub fn tool_call_followup(question: &str) -> ToolCallFull {
-        ToolCallFull::from(ToolCatalog::Followup(Followup {
-            question: question.to_string(),
-            ..Default::default()
-        }))
-    }
-
     /// Creates a Plan tool call with the specified plan name, version, and
     /// content
     pub fn tool_call_plan(plan_name: &str, version: &str, content: &str) -> ToolCallFull {
@@ -1105,6 +1519,7 @@ impl ToolCatalog {
             plan_name: plan_name.to_string(),
             version: version.to_string(),
             content: content.to_string(),
+            overwrite: false,
         }))
     }
 
@@ -1567,148 +1982,48 @@ mod tests {
     fn test_fs_patch_backward_compatibility_path() {
         use crate::{ToolCallArguments, ToolCallFull};
 
-        // Test old field name "path" still works
         let tool_call = ToolCallFull {
             name: ToolName::new("patch"),
             call_id: None,
             arguments: ToolCallArguments::from_json(
-                r#"{"path": "/test/file.rs", "operation": "replace", "new_string": "new", "old_string": "old"}"#,
+                r#"{"path": "/test/file.rs", "new_string": "new", "old_string": "old"}"#,
             ),
             thought_signature: None,
         };
 
-        let actual = ToolCatalog::try_from(tool_call);
+        let actual = ToolCatalog::try_from(tool_call).unwrap();
 
-        assert!(
-            actual.is_ok(),
-            "Should successfully parse old 'path' field name"
-        );
-
-        if let Ok(ToolCatalog::Patch(fs_patch)) = actual {
-            assert_eq!(fs_patch.file_path, "/test/file.rs");
-        } else {
-            panic!("Expected FSPatch variant");
-        }
-    }
-
-    #[test]
-    fn test_fs_patch_backward_compatibility_search() {
-        use crate::{ToolCallArguments, ToolCallFull};
-
-        // Test old field name "search" still works
-        let tool_call = ToolCallFull {
-            name: ToolName::new("patch"),
-            call_id: None,
-            arguments: ToolCallArguments::from_json(
-                r#"{"file_path": "/test/file.rs", "operation": "replace", "new_string": "new", "search": "old text"}"#,
-            ),
-            thought_signature: None,
-        };
-
-        let actual = ToolCatalog::try_from(tool_call);
-
-        assert!(
-            actual.is_ok(),
-            "Should successfully parse old 'search' field name"
-        );
-
-        if let Ok(ToolCatalog::Patch(fs_patch)) = actual {
-            assert_eq!(fs_patch.old_string, "old text");
-        } else {
-            panic!("Expected FSPatch variant");
-        }
-    }
-
-    #[test]
-    fn test_fs_patch_backward_compatibility_content() {
-        use crate::{ToolCallArguments, ToolCallFull};
-
-        // Test old field name "content" still works
-        let tool_call = ToolCallFull {
-            name: ToolName::new("patch"),
-            call_id: None,
-            arguments: ToolCallArguments::from_json(
-                r#"{"file_path": "/test/file.rs", "operation": "replace", "content": "new content", "old_string": "old"}"#,
-            ),
-            thought_signature: None,
-        };
-
-        let actual = ToolCatalog::try_from(tool_call);
-
-        assert!(
-            actual.is_ok(),
-            "Should successfully parse old 'content' field name"
-        );
-
-        if let Ok(ToolCatalog::Patch(fs_patch)) = actual {
-            assert_eq!(fs_patch.new_string, "new content");
-        } else {
-            panic!("Expected FSPatch variant");
-        }
+        let expected = ToolCatalog::Patch(crate::FSPatch::new("/test/file.rs", "old", "new"));
+        assert_eq!(actual, expected);
     }
 
     #[test]
     fn test_fs_patch_backward_compatibility_all_old_fields() {
         use crate::{ToolCallArguments, ToolCallFull};
 
-        // Test all old field names together
         let tool_call = ToolCallFull {
             name: ToolName::new("patch"),
             call_id: None,
             arguments: ToolCallArguments::from_json(
-                r#"{"path": "/test/file.rs", "operation": "replace", "content": "new content", "search": "old text"}"#,
+                r#"{"path": "/test/file.rs", "content": "new content", "search": "old text"}"#,
             ),
             thought_signature: None,
         };
 
-        let actual = ToolCatalog::try_from(tool_call);
+        let actual = ToolCatalog::try_from(tool_call).unwrap();
 
-        assert!(
-            actual.is_ok(),
-            "Should successfully parse all old field names together"
-        );
-
-        if let Ok(ToolCatalog::Patch(fs_patch)) = actual {
-            assert_eq!(fs_patch.file_path, "/test/file.rs");
-            assert_eq!(fs_patch.old_string, "old text");
-            assert_eq!(fs_patch.new_string, "new content");
-        } else {
-            panic!("Expected FSPatch variant");
-        }
-    }
-
-    #[test]
-    fn test_fs_patch_new_field_names() {
-        use crate::{ToolCallArguments, ToolCallFull};
-
-        // Test new field names work as expected
-        let tool_call = ToolCallFull {
-            name: ToolName::new("patch"),
-            call_id: None,
-            arguments: ToolCallArguments::from_json(
-                r#"{"file_path": "/test/file.rs", "operation": "replace", "new_string": "new content", "old_string": "old text"}"#,
-            ),
-            thought_signature: None,
-        };
-
-        let actual = ToolCatalog::try_from(tool_call);
-
-        assert!(actual.is_ok(), "Should successfully parse new field names");
-
-        if let Ok(ToolCatalog::Patch(fs_patch)) = actual {
-            assert_eq!(fs_patch.file_path, "/test/file.rs");
-            assert_eq!(fs_patch.old_string, "old text");
-            assert_eq!(fs_patch.new_string, "new content");
-        } else {
-            panic!("Expected FSPatch variant");
-        }
+        let expected = ToolCatalog::Patch(crate::FSPatch::new(
+            "/test/file.rs",
+            "old text",
+            "new content",
+        ));
+        assert_eq!(actual, expected);
     }
 
     #[test]
     fn test_fs_patch_with_replace_all() {
         use crate::{ToolCallArguments, ToolCallFull};
 
-        // Test replace_all parameter
         let tool_call = ToolCallFull {
             name: ToolName::new("patch"),
             call_id: None,
@@ -1718,41 +2033,78 @@ mod tests {
             thought_signature: None,
         };
 
-        let actual = ToolCatalog::try_from(tool_call);
+        let actual = ToolCatalog::try_from(tool_call).unwrap();
 
-        assert!(
-            actual.is_ok(),
-            "Should successfully parse replace_all parameter"
+        let expected = ToolCatalog::Patch(
+            crate::FSPatch::new("/test/file.rs", "old", "new").replace_all(true),
         );
+        assert_eq!(actual, expected);
+    }
 
-        if let Ok(ToolCatalog::Patch(fs_patch)) = actual {
-            assert_eq!(fs_patch.replace_all, true);
-        } else {
-            panic!("Expected FSPatch variant");
-        }
+    #[test]
+    fn test_fs_patch_edits_form() {
+        use crate::{PatchEdit, ToolCallArguments, ToolCallFull};
+
+        let tool_call = ToolCallFull {
+            name: ToolName::new("patch"),
+            call_id: None,
+            arguments: ToolCallArguments::from_json(
+                r#"{"file_path": "/a.rs", "edits": [{"old_string": "a", "new_string": "b"}, {"old_string": "c", "new_string": "d", "replace_all": true}]}"#,
+            ),
+            thought_signature: None,
+        };
+
+        let actual = ToolCatalog::try_from(tool_call).unwrap();
+
+        let expected = ToolCatalog::Patch(crate::FSPatch::batch(
+            "/a.rs",
+            vec![
+                PatchEdit::new("a", "b"),
+                PatchEdit::new("c", "d").replace_all(true),
+            ],
+        ));
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_fs_patch_resolve_edits_scalar() {
+        let fixture = crate::FSPatch::new("/a.rs", "x", "y").replace_all(true);
+        let actual = fixture.resolve_edits().unwrap();
+        let expected = vec![crate::PatchEdit::new("x", "y").replace_all(true)];
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_fs_patch_resolve_edits_rejects_both_forms() {
+        let mut fixture = crate::FSPatch::new("/a.rs", "x", "y");
+        fixture.edits = Some(vec![crate::PatchEdit::new("a", "b")]);
+        let actual = fixture.resolve_edits().unwrap_err().to_string();
+        let expected =
+            "pass either the scalar form (old_string/new_string/replace_all) or edits, not both";
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_fs_patch_resolve_edits_rejects_empty_and_missing() {
+        let empty = crate::FSPatch::batch("/a.rs", vec![]);
+        let missing = crate::FSPatch { file_path: "/a.rs".to_string(), ..Default::default() };
+        let actual = (
+            empty.resolve_edits().unwrap_err().to_string(),
+            missing.resolve_edits().unwrap_err().to_string(),
+        );
+        let expected = (
+            "edits must be a non-empty list of {old_string, new_string} objects".to_string(),
+            "old_string and new_string are required (or pass edits)".to_string(),
+        );
+        assert_eq!(actual, expected);
     }
 
     #[test]
     fn test_unit_enum_schema_generation() {
         use schemars::generate::SchemaSettings;
 
-        use crate::{OutputMode, PatchOperation};
+        use crate::OutputMode;
 
-        // Test PatchOperation schema
-        let settings = SchemaSettings::default().into_generator();
-        let patch_schema = settings.into_root_schema_for::<PatchOperation>();
-
-        // In schemars 1.0, Schema wraps serde_json::Value, so we check the JSON
-        // directly
-        let schema_value = patch_schema.as_value();
-        assert_eq!(schema_value.get("type"), Some(&serde_json::json!("string")));
-
-        let enum_values = schema_value.get("enum").and_then(|v| v.as_array()).unwrap();
-        assert_eq!(enum_values.len(), 5);
-        assert_eq!(enum_values[0], serde_json::json!("prepend"));
-        assert_eq!(enum_values[1], serde_json::json!("append"));
-
-        // Test OutputMode schema
         let settings = SchemaSettings::default().into_generator();
         let output_schema = settings.into_root_schema_for::<OutputMode>();
 
@@ -1774,9 +2126,8 @@ mod tests {
         let fixture = Shell {
             command: "git status".to_string(),
             cwd: Some(PathBuf::from("/test")),
-            keep_ansi: false,
-            env: None,
             description: Some("Shows working tree status".to_string()),
+            ..Default::default()
         };
 
         let actual = serde_json::to_value(&fixture).unwrap();
@@ -1797,9 +2148,7 @@ mod tests {
         let fixture = Shell {
             command: "ls -la".to_string(),
             cwd: Some(PathBuf::from("/home")),
-            keep_ansi: false,
-            env: None,
-            description: None,
+            ..Default::default()
         };
 
         let actual = serde_json::to_value(&fixture).unwrap();
@@ -1816,13 +2165,7 @@ mod tests {
     fn test_shell_without_cwd_serialization() {
         use pretty_assertions::assert_eq;
 
-        let fixture = Shell {
-            command: "pwd".to_string(),
-            cwd: None,
-            keep_ansi: false,
-            env: None,
-            description: None,
-        };
+        let fixture = Shell { command: "pwd".to_string(), ..Default::default() };
 
         let actual = serde_json::to_value(&fixture).unwrap();
 

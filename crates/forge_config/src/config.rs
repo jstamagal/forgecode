@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::reader::ConfigReader;
 use crate::writer::ConfigWriter;
 use crate::{
-    AutoDumpFormat, Compact, Decimal, HttpConfig, ModelConfig, ReasoningConfig, RetryConfig, Update,
+    AutoDumpFormat, Compact, Decimal, HttpConfig, McpSettings, ModelConfig, ReasoningConfig,
+    RetryConfig, ToolAliasProfile, Update,
 };
 
 /// Wire protocol a provider uses for chat completions.
@@ -122,32 +123,51 @@ pub struct ForgeConfig {
     /// Retry settings applied at the system level to all IO operations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetryConfig>,
-    /// Maximum number of lines returned by a single file search operation.
+    /// Environment variable names a `shell` command inherits without naming
+    /// them in its `env` argument. Unset means PATH, HOME, USER, LANG,
+    /// LC_ALL, TERM, PWD, SHELL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_env_allow: Option<Vec<String>>,
+    /// Shell output shown per call, stdout and stderr together; past it the
+    /// head and tail are shown and the whole stream is written to a file.
     #[serde(default)]
-    pub max_search_lines: usize,
-    /// Maximum number of bytes returned by a single file search operation.
+    pub max_bash_output_bytes: u64,
+    /// Maximum nesting depth of `task` workers (a worker's own task calls
+    /// count one level deeper).
     #[serde(default)]
-    pub max_search_result_bytes: usize,
-    /// Maximum number of characters returned from a URL fetch.
+    pub task_max_depth: usize,
+    /// Maximum workers one `task` call runs at once.
     #[serde(default)]
-    pub max_fetch_chars: usize,
-    /// Maximum number of lines captured from the leading portion of shell
-    /// command output.
+    pub subagent_max_workers: usize,
+    /// When true, the `task` tool refuses a `model` override; workers always
+    /// run on their agent's configured model.
     #[serde(default)]
-    pub max_stdout_prefix_lines: usize,
-    /// Maximum number of lines captured from the trailing portion of shell
-    /// command output.
+    pub lock_subagent_model: bool,
+    /// Model-facing tool names for matching models (X23); the first profile
+    /// whose `match` hits the model or provider id applies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_alias_profiles: Vec<ToolAliasProfile>,
+    /// Directory the `plan` tool writes to; relative paths resolve against
+    /// the working directory. Unset means `{cwd}/plans`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plans_dir: Option<PathBuf>,
+    /// MCP settings (per-agent server/tool policy).
     #[serde(default)]
-    pub max_stdout_suffix_lines: usize,
-    /// Maximum number of characters per line in shell command output.
-    #[serde(default)]
-    pub max_stdout_line_chars: usize,
-    /// Maximum number of characters per line when reading a file.
-    #[serde(default)]
-    pub max_line_chars: usize,
+    pub mcp: McpSettings,
     /// Maximum number of lines read from a file in a single operation.
     #[serde(default)]
     pub max_read_lines: u64,
+    /// Largest file, in bytes, a whole-file read (no range) returns; larger
+    /// files must be read by line or byte range.
+    #[serde(default)]
+    pub max_read_bytes: u64,
+    /// Tool results larger than this many bytes are spilled to a file and
+    /// replaced by a preview; also sizes one page of a byte-range read.
+    #[serde(default)]
+    pub max_tool_result_inline_bytes: u64,
+    /// Hard cap, in bytes, on any single tool result.
+    #[serde(default)]
+    pub max_tool_result_bytes: u64,
     /// Maximum number of files read in a single batch operation.
     #[serde(default)]
     pub max_file_read_batch_size: usize,
@@ -160,8 +180,9 @@ pub struct ForgeConfig {
     /// Maximum image file size in bytes permitted for read operations.
     #[serde(default)]
     pub max_image_size_bytes: u64,
-    /// Maximum time in seconds a single tool call may run before being
-    /// cancelled.
+    /// Backstop in seconds for a tool call that does not bound its own run
+    /// time (default 600); 0 disables it. Tools with their own window or
+    /// timeout are not subject to it.
     #[serde(default)]
     pub tool_timeout_secs: u64,
     /// Whether to automatically open HTML dump files in the browser after
@@ -178,15 +199,7 @@ pub struct ForgeConfig {
     /// Maximum number of conversations shown in the conversation list.
     #[serde(default)]
     pub max_conversations: usize,
-    /// Maximum number of candidate results returned from the initial semantic
-    /// search vector query.
-    #[serde(default)]
-    pub max_sem_search_results: usize,
-    /// Number of top results retained after re-ranking in semantic search.
-    #[serde(default)]
-    pub sem_search_top_k: usize,
-    /// Base URL of the Forge services API used for semantic search and
-    /// indexing.
+    /// Base URL of the Forge services API used for workspace indexing.
     #[serde(default)]
     #[dummy(expr = "\"https://api.forgecode.dev/api\".to_string()")]
     pub services_url: String,
@@ -268,6 +281,27 @@ pub struct ForgeConfig {
     #[serde(default)]
     pub restricted: bool,
 
+    /// X18: argument ban patterns, tool name → bans. A call whose argument
+    /// matches a ban's regex is refused before it runs. Always on, also
+    /// without `--restricted`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub tool_bans: std::collections::BTreeMap<String, Vec<crate::ToolBan>>,
+
+    /// X20: the jail directory (`--jail DIR`). When set, tool-spawned
+    /// processes run under `bwrap` with DIR read-write and the system
+    /// read-only, and file tools refuse paths outside DIR and `jail_bind`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jail: Option<PathBuf>,
+
+    /// X20: extra paths visible in the jail: `path` (read-only), `path:ro` or
+    /// `path:rw`; `~` expands to the home directory.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jail_bind: Vec<String>,
+
+    /// X19: user hooks run on tool calls, tool results and turn boundaries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hooks: Vec<crate::UserHook>,
+
     /// Whether tool use is supported in the current environment; when false,
     /// all tool calls are disabled.
     #[serde(default)]
@@ -301,13 +335,6 @@ pub struct ForgeConfig {
     /// when a task ends and reminds the LLM about them.
     #[serde(default)]
     pub verify_todos: bool,
-
-    /// Switches patch replacement fallback from the legacy fuzzy-search range
-    /// lookup to the newer text-patch gRPC API.
-    /// Defaults to `false` so patching continues to use the legacy fallback
-    /// behavior unless explicitly enabled in `forge.toml`.
-    #[serde(default)]
-    pub use_text_patch_fallback: bool,
 
     /// Whether the deep research agent is available.
     ///

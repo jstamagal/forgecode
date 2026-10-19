@@ -6,17 +6,31 @@ expression: tools
   "type": "object",
   "properties": {
     "file_path": {
-      "description": "Absolute path to the file to read.",
+      "description": "Path of the file to read.",
       "type": "string"
     },
     "range": {
-      "description": "Optional line range for partial reads.",
+      "description": "Optional line range (`start_line`/`end_line`) or byte range\n(`start_byte`/`end_byte`) for partial reads.",
       "type": "object",
       "properties": {
+        "end_byte": {
+          "description": "0-based offset one past the last byte to read (byte range).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "nullable": true
+        },
         "end_line": {
           "description": "Inclusive 1-based last line.",
           "type": "integer",
           "format": "int32",
+          "nullable": true
+        },
+        "start_byte": {
+          "description": "0-based byte offset of the first byte to read (byte range).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
           "nullable": true
         },
         "start_line": {
@@ -30,7 +44,7 @@ expression: tools
       "nullable": true
     },
     "show_line_numbers": {
-      "description": "If true, prefixes each line with its line index (starting at 1).\nDefaults to true.",
+      "description": "If true, prefixes each line with its line number. Defaults to true.",
       "type": "boolean",
       "default": true
     }
@@ -44,18 +58,19 @@ expression: tools
   "type": "object",
   "properties": {
     "content": {
-      "description": "The content to write to the file",
+      "description": "The complete file content to write.",
       "type": "string"
     },
     "file_path": {
-      "description": "The absolute path to the file to write (must be absolute, not relative)",
+      "description": "Path of the file to create or replace.",
       "type": "string"
     },
     "overwrite": {
-      "description": "If set to true, existing files will be overwritten. If not set and the\nfile exists, an error will be returned with the content of the\nexisting file.",
+      "description": "Required to replace an existing file; the file must have been read\nfirst and must not have changed since.",
       "type": "boolean"
     }
   },
+  "additionalProperties": false,
   "required": [
     "file_path",
     "content"
@@ -64,63 +79,68 @@ expression: tools
 {
   "type": "object",
   "properties": {
-    "-A": {
-      "description": "Number of lines to show after each match (rg -A). Requires output_mode:\n\"content\", ignored otherwise.",
-      "type": "integer",
-      "format": "uint32",
-      "minimum": 0,
-      "nullable": true
-    },
-    "-B": {
-      "description": "Number of lines to show before each match (rg -B). Requires output_mode:\n\"content\", ignored otherwise.",
-      "type": "integer",
-      "format": "uint32",
-      "minimum": 0,
-      "nullable": true
-    },
-    "-C": {
-      "description": "Number of lines to show before and after each match (rg -C). Requires\noutput_mode: \"content\", ignored otherwise.",
-      "type": "integer",
-      "format": "uint32",
-      "minimum": 0,
-      "nullable": true
-    },
-    "-i": {
-      "description": "Case insensitive search (rg -i)",
+    "case_insensitive": {
+      "description": "Match without case sensitivity.",
       "type": "boolean",
       "nullable": true
     },
-    "-n": {
-      "description": "Show line numbers in output (rg -n). Requires output_mode: \"content\",\nignored otherwise.",
-      "type": "boolean",
+    "context": {
+      "description": "Lines of context before and after each match (content mode).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0,
+      "nullable": true
+    },
+    "context_after": {
+      "description": "Lines of context after each match (content mode).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0,
+      "nullable": true
+    },
+    "context_before": {
+      "description": "Lines of context before each match (content mode).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0,
+      "nullable": true
+    },
+    "file_type": {
+      "description": "File type, e.g. rust, py, js (ripgrep type names).",
+      "type": "string",
       "nullable": true
     },
     "glob": {
-      "description": "Glob pattern to filter files (e.g. \"*.js\", \"*.{ts,tsx}\") - maps to rg\n--glob",
+      "description": "Glob filter on paths (e.g. \"*.rs\", \"*.{ts,tsx}\", \"!*.min.js\").",
       "type": "string",
       "nullable": true
     },
     "head_limit": {
-      "description": "Limit output to first N lines/entries, equivalent to \"| head -N\". Works\nacross all output modes: content (limits output lines),\nfiles_with_matches (limits file paths), count (limits count entries).\nWhen unspecified, shows all results from ripgrep.",
+      "description": "Maximum result entries after `offset`.",
       "type": "integer",
       "format": "uint32",
-      "minimum": 0,
+      "minimum": 1,
+      "nullable": true
+    },
+    "line_numbers": {
+      "description": "Prefix content lines with their line numbers (default true).",
+      "type": "boolean",
       "nullable": true
     },
     "multiline": {
-      "description": "Enable multiline mode where . matches newlines and patterns can span\nlines (rg -U --multiline-dotall). Default: false.",
+      "description": "Let the regex span lines (`.` matches newlines).",
       "type": "boolean",
       "nullable": true
     },
     "offset": {
-      "description": "Skip first N lines/entries before applying head_limit",
+      "description": "Result entries to skip before `head_limit`.",
       "type": "integer",
       "format": "uint32",
       "minimum": 0,
       "nullable": true
     },
     "output_mode": {
-      "description": "Output mode: \"content\" shows matching lines (supports -A/-B/-C context,\n-n line numbers, head_limit), \"files_with_matches\" shows file paths\n(supports head_limit), \"count\" shows match counts (supports head_limit).\nDefaults to \"files_with_matches\".",
+      "description": "\"content\" (matching lines), \"files_with_matches\" (paths, default) or\n\"count\" (matches per file).",
       "type": "string",
       "enum": [
         "content",
@@ -131,20 +151,56 @@ expression: tools
       "nullable": true
     },
     "path": {
-      "description": "File or directory to search in (rg PATH). Defaults to current working\ndirectory.",
+      "description": "File or directory to search (default: the current directory).",
       "type": "string",
       "nullable": true
     },
     "pattern": {
-      "description": "The regular expression pattern to search for in file contents.",
+      "description": "Regex to search file contents for.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "pattern"
+  ]
+}
+{
+  "description": "Input for the `ast_search` tool: structural search and rewrite.",
+  "type": "object",
+  "properties": {
+    "apply": {
+      "description": "Write the rewrite (default false).",
+      "type": "boolean"
+    },
+    "language": {
+      "description": "Language (e.g. rust, python, typescript, tsx, go, c, cpp); inferred\nfrom each file's extension when omitted.",
+      "type": "string",
+      "nullable": true
+    },
+    "max_results": {
+      "description": "Most matches reported (default 200); an apply with more matches is\nrefused.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 1,
+      "nullable": true
+    },
+    "path": {
+      "description": "File or directory to search (default: the current directory).",
+      "type": "string",
+      "nullable": true
+    },
+    "pattern": {
+      "description": "ast-grep pattern; `$NAME` matches one node, `$$$NAME` zero or more.",
       "type": "string"
     },
-    "type": {
-      "description": "File type to search (rg --type). Common types: js, py, rust, go, java,\netc. More efficient than include for standard file types.",
+    "rewrite": {
+      "description": "Replacement template using the pattern's metavariables; without\n`apply` the result is a diff and nothing is written.",
       "type": "string",
       "nullable": true
     }
   },
+  "additionalProperties": false,
   "required": [
     "pattern"
   ]
@@ -152,120 +208,87 @@ expression: tools
 {
   "type": "object",
   "properties": {
-    "queries": {
-      "description": "List of search queries to execute in parallel. Using multiple queries\n(2-3) with varied phrasings significantly improves results - each query\ncaptures different aspects of what you're looking for. Each query pairs\na search term with a use_case for reranking. Example: for\nauthentication, try \"user login verification\", \"token generation\",\n\"OAuth flow\".",
-      "type": "array",
-      "items": {
-        "description": "A paired query and use_case for semantic search. Each query must have a\ncorresponding use_case for document reranking.",
-        "type": "object",
-        "properties": {
-          "query": {
-            "description": "The semantic embedding query that describes WHAT the code does or its\npurpose. This query is converted to a vector embedding and used to find\nsemantically similar code chunks in the vector database.\n\n**Guidelines for effective embedding queries:**\n- Use specific, targeted technical terms and domain concepts\n- Describe behavior, functionality, patterns, or implementation approach\n- Include concrete keywords like technology names, algorithms, data\n  structures\n- Balance specificity (focused results) with generality (avoid missing\n  relevant code)\n- Keep queries focused - overly broad queries cause timeouts and poor\n  results\n- **Align keywords with intent**: For documentation, use \"README\",\n  \"guide\", \"setup\"; for implementation, use \"function\", \"logic\",\n  \"handler\"\n\n**Good examples:**\n- \"exponential backoff retry mechanism with configurable delays\"\n- \"streaming LLM responses with SSE chunked transfer encoding\"\n- \"OAuth2 token refresh with automatic retry and expiry check\"\n- \"Diesel database migration runner with transaction support\"\n- \"semantic search reranker using cross-encoder model\"\n- \"README documentation configuration setup semantic search\"\n- \"markdown guide API documentation tool definitions\"\n\n**Bad examples:**\n- \"retry\" (too generic, will match everything)\n- \"authentication\" (overly broad - specify what aspect: login, tokens,\n  middleware?)\n- \"tool definitions schemas\" (too vague - be more specific about\n  structure or location)\n- \"how system works\" (meta-question, not searchable concept)\n- \"function that validates\" (focus on what it validates, not that it's a\n  function)",
-            "type": "string"
-          },
-          "use_case": {
-            "description": "The reranking query that describes your INTENT and WHY you need this\ncode. This query is used by the reranker model to filter and\nprioritize the most relevant results from the initial embedding\nsearch based on your specific use case.\n\n**Purpose:** While `query` casts a wide net for similar code, `use_case`\nnarrows it down by intent: implementation vs docs vs tests, reading\nvs modifying code, understanding architecture vs finding bugs, etc.\n\n**Guidelines for effective reranking queries:**\n- **MANDATORY FOR CODE**: ALWAYS include codebase construct keywords\n  (struct, trait, impl, interface, class, function, fn, definition,\n  implementation, declaration, type) when searching for code\n- **WHY CRITICAL**: The reranker gives HIGH WEIGHTAGE to these keywords\n  - \"struct\" → prioritizes struct definitions\n  - \"trait impl\" → prioritizes trait implementations\n  - \"function\" / \"fn\" → prioritizes function definitions\n  - Without these, you get documentation instead of code!\n- Clearly state your goal: understand, modify, debug, find examples,\n  etc.\n- Specify the TYPE of code you need: implementation, tests, docs,\n  config, architecture\n- Include WHY context: \"to fix a bug\", \"to add a feature\", \"to\n  understand flow\"\n- Be explicit about what to AVOID: \"not tests\", \"not documentation\",\n  \"not examples\"\n- **Match intent to file types**: documentation intent → avoid\n  requesting \"implementation code\"; implementation intent → avoid\n  requesting \"documentation\"\n- Keep it concise (1-2 sentences) but informative\n- MUST be different from the embedding query - add intent/context\n\n**Good examples (ALWAYS include construct keywords):**\n- \"I need the struct definition and trait implementation for Diesel\n  migrations to understand the transaction handling, not setup docs\"\n- \"Show me the function implementation for semantic search reranker so I\n  can modify it to support file type filtering\"\n- \"Find the type declarations and interface definitions for the tool\n  registry, not the usage examples\"\n- \"I'm debugging a timeout issue and need the function implementation\n  that handles streaming responses, not the API documentation\"\n- \"Show me the struct definitions and trait implementations for\n  authentication, not the setup guide\"\n- \"I need the impl block for workspace sync to understand how it detects\n  file changes\"\n- \"Find the fn definitions for embedding generation batching logic\"\n- \"I need documentation explaining how to configure semantic search, not\n  the implementation code\"\n- \"Find the README or setup guide that explains the tool registration\n  process, avoiding implementation details\"\n\n**Bad examples (missing construct keywords = FAILS):**\n- \"I need code that handles authentication\" ❌ MISSING:\n  struct/trait/impl/function\n- \"Show me the database logic\" ❌ MISSING: trait/impl/function keywords\n- \"I need the workspace sync implementation\" ❌ MISSING: struct/impl/fn\n  - too generic\n- \"Find the reranker code\" ❌ MISSING: struct/trait/impl/function\n- \"exponential backoff retry mechanism\" ❌ MISSING: WHY + construct\n  keywords\n- \"find authentication code\" ❌ MISSING: which construct? struct? trait?\n  impl?\n- \"tool definitions\" ❌ MISSING: struct? trait? type? be specific\n- \"how it works\" (too vague - specify what you want to understand)\n- Long rambling explanation without clear intent (keep it focused)",
-            "type": "string"
-          }
-        },
-        "required": [
-          "query",
-          "use_case"
-        ]
-      }
-    }
-  },
-  "required": [
-    "queries"
-  ]
-}
-{
-  "type": "object",
-  "properties": {
     "path": {
-      "description": "The path of the file to remove (absolute path required)",
+      "description": "Path of the file, directory or symlink to remove.",
       "type": "string"
+    },
+    "permanent": {
+      "description": "Delete directly instead of moving to the trash (default false).",
+      "type": "boolean"
     }
   },
+  "additionalProperties": false,
   "required": [
     "path"
   ]
 }
 {
-  "type": "object",
-  "properties": {
-    "file_path": {
-      "description": "The absolute path to the file to modify",
-      "type": "string"
-    },
-    "new_string": {
-      "description": "The text to replace it with (must be different from old_string)",
-      "type": "string"
-    },
-    "old_string": {
-      "description": "The text to replace",
-      "type": "string"
-    },
-    "replace_all": {
-      "description": "Replace all occurrences of old_string (default false)",
-      "type": "boolean",
-      "default": false
-    }
-  },
-  "required": [
-    "file_path",
-    "old_string",
-    "new_string"
-  ]
-}
-{
+  "description": "Input for the `patch` tool: either the scalar form (`old_string`,\n`new_string`, `replace_all`) or the batch form (`edits`), never both.",
   "type": "object",
   "properties": {
     "edits": {
-      "description": "Array of edit operations to perform sequentially on the file",
+      "description": "Several replacements applied in order, each seeing the previous\nresult. Never combined with the scalar form.",
       "type": "array",
       "items": {
-        "description": "A single edit operation in a multi-patch",
+        "description": "A single replacement inside a batch `patch` call.",
         "type": "object",
         "properties": {
           "new_string": {
-            "description": "The text to replace it with (must be different from old_string)",
+            "description": "Replacement text; must differ from old_string.",
             "type": "string"
           },
           "old_string": {
-            "description": "The text to replace",
+            "description": "Exact text to replace.",
             "type": "string"
           },
           "replace_all": {
-            "description": "Replace all occurrences of old_string (default false)",
+            "description": "Replace every occurrence of old_string instead of requiring exactly\none (default false).",
             "type": "boolean",
             "default": false
           }
         },
+        "additionalProperties": false,
         "required": [
           "old_string",
           "new_string"
         ]
-      }
+      },
+      "minItems": 1,
+      "nullable": true
     },
     "file_path": {
-      "description": "The absolute path to the file to modify",
+      "description": "Path of the file to modify.",
       "type": "string"
+    },
+    "new_string": {
+      "description": "Replacement text; must differ from old_string (scalar form).",
+      "type": "string",
+      "nullable": true
+    },
+    "old_string": {
+      "description": "Exact text to replace (scalar form).",
+      "type": "string",
+      "nullable": true
+    },
+    "replace_all": {
+      "description": "Replace every occurrence of old_string instead of requiring exactly\none (scalar form, default false).",
+      "type": "boolean"
     }
   },
+  "additionalProperties": false,
   "required": [
-    "file_path",
-    "edits"
+    "file_path"
   ]
 }
 {
   "type": "object",
   "properties": {
     "path": {
-      "description": "The absolute path of the file to revert to its previous state.",
+      "description": "Path whose latest snapshot should be restored.",
       "type": "string"
     }
   },
+  "additionalProperties": false,
   "required": [
     "path"
   ]
@@ -273,51 +296,117 @@ expression: tools
 {
   "type": "object",
   "properties": {
+    "action": {
+      "description": "run (default), poll, wait or kill.",
+      "oneOf": [
+        {
+          "description": "Start `command` and wait up to `timeout` seconds for it.",
+          "type": "string",
+          "const": "run"
+        },
+        {
+          "description": "Report a running job's new output without waiting.",
+          "type": "string",
+          "const": "poll"
+        },
+        {
+          "description": "Wait up to `timeout` more seconds for a running job.",
+          "type": "string",
+          "const": "wait"
+        },
+        {
+          "description": "Stop a running job (SIGTERM, then SIGKILL, to its process group).",
+          "type": "string",
+          "const": "kill"
+        }
+      ]
+    },
     "command": {
-      "description": "The shell command to execute.",
-      "type": "string"
+      "description": "The command to run (required for action \"run\").",
+      "type": "string",
+      "default": ""
     },
     "cwd": {
-      "description": "The working directory where the command should be executed.\nIf not specified, defaults to the current working directory from the\nenvironment.",
+      "description": "Working directory for the command (default: the current directory).",
       "type": "string",
       "nullable": true
     },
     "description": {
-      "description": "Clear, concise description of what this command does. Recommended to be\n5-10 words for simple commands. For complex commands with pipes or\nmultiple operations, provide more context. Examples: \"Lists files in\ncurrent directory\", \"Installs package dependencies\", \"Compiles Rust\nproject with release optimizations\".",
+      "description": "Short description of what the command does.",
       "type": "string",
       "nullable": true
     },
     "env": {
-      "description": "Environment variable names to pass to command execution (e.g., [\"PATH\",\n\"HOME\", \"USER\"]). The system automatically reads the specified\nvalues and applies them during command execution.",
+      "description": "Extra environment variable names to pass through, on top of the\nconfigured allow-list.",
       "type": "array",
       "items": {
         "type": "string"
       },
       "nullable": true
     },
+    "handle": {
+      "description": "Job id from a `HANDLE n RUNNING` line, for poll/wait/kill (default:\nthe most recent running job).",
+      "type": "string",
+      "nullable": true
+    },
     "keep_ansi": {
-      "description": "Whether to preserve ANSI escape codes in the output.\nIf true, ANSI escape codes will be preserved in the output.\nIf false (default), ANSI escape codes will be stripped from the output.",
+      "description": "Keep ANSI escape codes in the output (default false).",
       "type": "boolean"
+    },
+    "timeout": {
+      "description": "Seconds to wait before returning a handle (run) or to keep waiting\n(wait); default 30. The command is never killed when the window ends.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 1,
+      "nullable": true
     }
   },
-  "required": [
-    "command"
-  ]
+  "additionalProperties": false
 }
 {
   "description": "Input type for the net fetch tool",
   "type": "object",
   "properties": {
+    "body": {
+      "description": "Request body text.",
+      "type": "string",
+      "nullable": true
+    },
+    "headers": {
+      "description": "Request headers, name to value.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "nullable": true
+    },
+    "json_body": {
+      "description": "Request body as JSON (sets Content-Type: application/json); not with\n`body`.",
+      "type": "object",
+      "additionalProperties": true,
+      "nullable": true
+    },
+    "method": {
+      "description": "HTTP method (default GET).",
+      "type": "string",
+      "nullable": true
+    },
     "raw": {
-      "description": "Get raw content without any markdown conversion (default: false)",
+      "description": "Return the body as is, without HTML-to-markdown conversion (default\nfalse).",
       "type": "boolean",
       "nullable": true
     },
+    "save": {
+      "description": "Stream the response body to this path instead of returning it; no size\nlimit, resumable.",
+      "type": "string",
+      "nullable": true
+    },
     "url": {
-      "description": "URL to fetch",
+      "description": "URL to fetch: http(s):// or file://.",
       "type": "string"
     }
   },
+  "additionalProperties": false,
   "required": [
     "url"
   ]
@@ -325,61 +414,24 @@ expression: tools
 {
   "type": "object",
   "properties": {
-    "multiple": {
-      "description": "If true, allows selecting multiple options; if false (default), only one\noption can be selected",
-      "type": "boolean",
-      "nullable": true
-    },
-    "option1": {
-      "description": "First option to choose from",
-      "type": "string",
-      "nullable": true
-    },
-    "option2": {
-      "description": "Second option to choose from",
-      "type": "string",
-      "nullable": true
-    },
-    "option3": {
-      "description": "Third option to choose from",
-      "type": "string",
-      "nullable": true
-    },
-    "option4": {
-      "description": "Fourth option to choose from",
-      "type": "string",
-      "nullable": true
-    },
-    "option5": {
-      "description": "Fifth option to choose from",
-      "type": "string",
-      "nullable": true
-    },
-    "question": {
-      "description": "Question to ask the user",
-      "type": "string"
-    }
-  },
-  "required": [
-    "question"
-  ]
-}
-{
-  "type": "object",
-  "properties": {
     "content": {
-      "description": "The content to write to the plan file. This should be the complete\nplan content in markdown format.",
+      "description": "The complete plan content in markdown, written verbatim.",
       "type": "string"
+    },
+    "overwrite": {
+      "description": "Replace an existing plan with the same name and version (default\nfalse).",
+      "type": "boolean"
     },
     "plan_name": {
-      "description": "The name of the plan (will be used in the filename)",
+      "description": "The name of the plan (sanitised into the filename).",
       "type": "string"
     },
     "version": {
-      "description": "The version of the plan (e.g., \"v1\", \"v2\", \"1.0\")",
+      "description": "The version of the plan (e.g., \"v1\", \"v2\", \"1.0\"; sanitised into the\nfilename).",
       "type": "string"
     }
   },
+  "additionalProperties": false,
   "required": [
     "plan_name",
     "version",
@@ -394,6 +446,7 @@ expression: tools
       "type": "string"
     }
   },
+  "additionalProperties": false,
   "required": [
     "name"
   ]
@@ -423,6 +476,7 @@ expression: tools
             ]
           }
         },
+        "additionalProperties": false,
         "required": [
           "content",
           "status"
@@ -430,6 +484,7 @@ expression: tools
       }
     }
   },
+  "additionalProperties": false,
   "required": [
     "todos"
   ]
@@ -441,25 +496,710 @@ expression: tools
   "description": "Input structure for the Task tool - delegates work to specialized agents",
   "type": "object",
   "properties": {
+    "action": {
+      "description": "run (default), poll, wait or kill; poll/wait/kill act on a background\ntask's handle.",
+      "oneOf": [
+        {
+          "description": "Start `command` and wait up to `timeout` seconds for it.",
+          "type": "string",
+          "const": "run"
+        },
+        {
+          "description": "Report a running job's new output without waiting.",
+          "type": "string",
+          "const": "poll"
+        },
+        {
+          "description": "Wait up to `timeout` more seconds for a running job.",
+          "type": "string",
+          "const": "wait"
+        },
+        {
+          "description": "Stop a running job (SIGTERM, then SIGKILL, to its process group).",
+          "type": "string",
+          "const": "kill"
+        }
+      ]
+    },
     "agent_id": {
-      "description": "The ID of the specialized agent to delegate to (e.g., \"forge\", \"muse\",\n\"sage\")",
-      "type": "string"
+      "description": "The agent the workers run as (required to start workers).",
+      "type": "string",
+      "default": ""
+    },
+    "background": {
+      "description": "Run the workers in the background and return a handle at once.",
+      "type": "boolean"
+    },
+    "handle": {
+      "description": "Handle of a background task (default: your most recent running one).",
+      "type": "string",
+      "nullable": true
+    },
+    "model": {
+      "description": "Model the workers run on instead of the agent's configured model. Leave\nunset unless the user asks for it.",
+      "type": "string",
+      "nullable": true
     },
     "session_id": {
-      "description": "Optional session ID to continue an existing agent session. If not\nprovided, a new stateless session will be created. Use this to\nmaintain context across multiple task invocations with the same\nagent.",
+      "description": "Resume an earlier worker session (one task only). An unknown id is an\nerror.",
       "type": "string",
       "nullable": true
     },
     "tasks": {
-      "description": "A list of clear and detailed descriptions of the tasks to be performed\nby the agent in parallel. Provide sufficient context and specific\nrequirements to enable the agent to understand and execute the work\naccurately.",
+      "description": "Self-contained prompts, one per worker; they run in parallel (required\nto start workers).",
       "type": "array",
+      "default": [],
       "items": {
         "type": "string"
       }
+    },
+    "timeout": {
+      "description": "Seconds a wait blocks (default: until the task ends).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 1,
+      "nullable": true
     }
   },
+  "additionalProperties": false
+}
+{
+  "description": "Input for `tool_discovery`: search the catalog of loadable tools and\nskills, or load one by id.",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "description": "Only rows of this kind: native, mcp or skill.",
+      "type": "string",
+      "enum": [
+        "native",
+        "mcp",
+        "skill",
+        null
+      ],
+      "nullable": true
+    },
+    "load": {
+      "description": "Catalog id to load, such as `native:lsp`, `mcp:github__list_issues`\nor `skill:review`; a tool's bare name also works.",
+      "type": "string",
+      "nullable": true
+    },
+    "offset": {
+      "description": "Continue a truncated result at its `next_offset`.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0,
+      "nullable": true
+    },
+    "query": {
+      "description": "Intent or words to search for; empty returns a compact index.",
+      "type": "string"
+    },
+    "source": {
+      "description": "Only rows with this source: an MCP server name, `native`, `skill`, or\n`mcp` for every MCP server.",
+      "type": "string",
+      "nullable": true
+    }
+  },
+  "additionalProperties": false
+}
+{
+  "description": "Input for MCP controls that act on a whole server (M3).",
+  "type": "object",
+  "properties": {
+    "server": {
+      "description": "Exact MCP server name (from a `tool_discovery` mcp status row).",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
   "required": [
-    "tasks",
-    "agent_id"
+    "server"
+  ]
+}
+{
+  "description": "Input for MCP controls that act on a whole server (M3).",
+  "type": "object",
+  "properties": {
+    "server": {
+      "description": "Exact MCP server name (from a `tool_discovery` mcp status row).",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "server"
+  ]
+}
+{
+  "description": "Input for MCP controls that act on one resource (M3).",
+  "type": "object",
+  "properties": {
+    "server": {
+      "description": "Exact MCP server name (from a `tool_discovery` mcp status row).",
+      "type": "string"
+    },
+    "uri": {
+      "description": "Exact resource URI, as returned by `mcp_resource_list` or\n`mcp_resource_templates`.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "server",
+    "uri"
+  ]
+}
+{
+  "description": "Input for MCP controls that act on one resource (M3).",
+  "type": "object",
+  "properties": {
+    "server": {
+      "description": "Exact MCP server name (from a `tool_discovery` mcp status row).",
+      "type": "string"
+    },
+    "uri": {
+      "description": "Exact resource URI, as returned by `mcp_resource_list` or\n`mcp_resource_templates`.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "server",
+    "uri"
+  ]
+}
+{
+  "description": "Input for MCP controls that act on one resource (M3).",
+  "type": "object",
+  "properties": {
+    "server": {
+      "description": "Exact MCP server name (from a `tool_discovery` mcp status row).",
+      "type": "string"
+    },
+    "uri": {
+      "description": "Exact resource URI, as returned by `mcp_resource_list` or\n`mcp_resource_templates`.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "server",
+    "uri"
+  ]
+}
+{
+  "description": "Input for MCP controls that act on a whole server (M3).",
+  "type": "object",
+  "properties": {
+    "server": {
+      "description": "Exact MCP server name (from a `tool_discovery` mcp status row).",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "server"
+  ]
+}
+{
+  "description": "Input for `mcp_prompt_get` (M3).",
+  "type": "object",
+  "properties": {
+    "arguments": {
+      "description": "Prompt arguments, name to string value.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "nullable": true
+    },
+    "name": {
+      "description": "Exact prompt name, as returned by `mcp_prompt_list`.",
+      "type": "string"
+    },
+    "server": {
+      "description": "Exact MCP server name (from a `tool_discovery` mcp status row).",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "server",
+    "name"
+  ]
+}
+{
+  "description": "T15: drive a persistent terminal.",
+  "type": "object",
+  "properties": {
+    "action": {
+      "description": "start, send, look, stop or list.",
+      "type": "string"
+    },
+    "cols": {
+      "description": "Columns (start only; default 120).",
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 400,
+      "minimum": 1,
+      "nullable": true
+    },
+    "command": {
+      "description": "Command to run (start).",
+      "type": "string",
+      "nullable": true
+    },
+    "cwd": {
+      "description": "Working directory (start; default the current directory).",
+      "type": "string",
+      "nullable": true
+    },
+    "keys": {
+      "description": "Comma-separated keys to send (send).",
+      "type": "string",
+      "nullable": true
+    },
+    "rows": {
+      "description": "Rows (start only; default 40).",
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 200,
+      "minimum": 1,
+      "nullable": true
+    },
+    "session": {
+      "description": "Session name (default \"main\").",
+      "type": "string",
+      "nullable": true
+    },
+    "wait_ms": {
+      "description": "Milliseconds to wait for output before reading the screen (default\n700, at most 10000).",
+      "type": "integer",
+      "format": "uint64",
+      "maximum": 10000,
+      "minimum": 0,
+      "nullable": true
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "action"
+  ]
+}
+{
+  "description": "T15: render a terminal session's screen as a PNG.",
+  "type": "object",
+  "properties": {
+    "session": {
+      "description": "Session name (default \"main\").",
+      "type": "string",
+      "nullable": true
+    },
+    "wait_ms": {
+      "description": "Milliseconds to wait for output first (default 100).",
+      "type": "integer",
+      "format": "uint64",
+      "maximum": 10000,
+      "minimum": 0,
+      "nullable": true
+    }
+  },
+  "additionalProperties": false
+}
+{
+  "description": "T18: language-server queries.",
+  "type": "object",
+  "properties": {
+    "character": {
+      "description": "1-based column (definition, references, hover).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 1,
+      "nullable": true
+    },
+    "file_path": {
+      "description": "File to query.",
+      "type": "string"
+    },
+    "line": {
+      "description": "1-based line (definition, references, hover).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 1,
+      "nullable": true
+    },
+    "operation": {
+      "description": "diagnostics, definition, references or hover.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "operation",
+    "file_path"
+  ]
+}
+{
+  "description": "T16: persistent Python kernel.",
+  "type": "object",
+  "properties": {
+    "action": {
+      "description": "run (default), poll, wait, interrupt, restart or kill.",
+      "type": "string",
+      "nullable": true
+    },
+    "code": {
+      "description": "Python code to run (run).",
+      "type": "string",
+      "nullable": true
+    },
+    "handle": {
+      "description": "Handle of a run that is still going (poll, wait).",
+      "type": "string",
+      "nullable": true
+    },
+    "timeout": {
+      "description": "Seconds a run (or wait) blocks before returning a handle (default 120).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 1,
+      "nullable": true
+    }
+  },
+  "additionalProperties": false
+}
+{
+  "description": "T17: the kernel's persistent function library.",
+  "type": "object",
+  "properties": {
+    "action": {
+      "description": "list (default), show, save, load, history or delete.",
+      "type": "string",
+      "nullable": true
+    },
+    "name": {
+      "description": "Function name (show, save, load, history, delete).",
+      "type": "string",
+      "nullable": true
+    },
+    "note": {
+      "description": "What the revision changed (save).",
+      "type": "string",
+      "nullable": true
+    },
+    "revision": {
+      "description": "Revision to show or load (default the latest).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 1,
+      "nullable": true
+    },
+    "scope": {
+      "description": "global (default) or project.",
+      "type": "string",
+      "nullable": true
+    },
+    "source": {
+      "description": "Function source (save): one top-level `def`.",
+      "type": "string",
+      "nullable": true
+    }
+  },
+  "additionalProperties": false
+}
+{
+  "description": "T13: render a page in a real browser engine (obscura).",
+  "type": "object",
+  "properties": {
+    "dump": {
+      "description": "markdown (default), text, html, links, original, assets or cookies.",
+      "type": "string",
+      "nullable": true
+    },
+    "screenshot": {
+      "description": "Write a PNG screenshot to this path instead of returning the page.",
+      "type": "string",
+      "nullable": true
+    },
+    "url": {
+      "description": "http(s):// or file:// URL.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "url"
+  ]
+}
+{
+  "description": "T14: drive a page in headless Chromium and capture frames.",
+  "type": "object",
+  "properties": {
+    "click": {
+      "description": "CSS selector to click after load.",
+      "type": "string",
+      "nullable": true
+    },
+    "hold_ms": {
+      "description": "Milliseconds between the two frames after the action (default 1600).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0,
+      "nullable": true
+    },
+    "output_dir": {
+      "description": "Directory for the frames (default a fresh directory under\ntool-results).",
+      "type": "string",
+      "nullable": true
+    },
+    "press": {
+      "description": "Comma-separated keys to press after load (Playwright key names).",
+      "type": "string",
+      "nullable": true
+    },
+    "settle_ms": {
+      "description": "Milliseconds to wait after load (default 1200).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0,
+      "nullable": true
+    },
+    "target": {
+      "description": "URL or local HTML file to open.",
+      "type": "string"
+    },
+    "viewport_height": {
+      "description": "Viewport height (default 800).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0,
+      "nullable": true
+    },
+    "viewport_width": {
+      "description": "Viewport width (default 1280).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0,
+      "nullable": true
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "target"
+  ]
+}
+{
+  "description": "T11: web search through Serper (Google results).",
+  "type": "object",
+  "properties": {
+    "num": {
+      "description": "Results (default 8).",
+      "type": "integer",
+      "format": "uint32",
+      "maximum": 100,
+      "minimum": 1,
+      "nullable": true
+    },
+    "query": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "query"
+  ]
+}
+{
+  "description": "T11: web search through Tavily.",
+  "type": "object",
+  "properties": {
+    "max_results": {
+      "description": "Results (default 8).",
+      "type": "integer",
+      "format": "uint32",
+      "maximum": 20,
+      "minimum": 1,
+      "nullable": true
+    },
+    "query": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "query"
+  ]
+}
+{
+  "description": "T11: semantic web search through Exa.",
+  "type": "object",
+  "properties": {
+    "num": {
+      "description": "Results (default 8).",
+      "type": "integer",
+      "format": "uint32",
+      "maximum": 100,
+      "minimum": 1,
+      "nullable": true
+    },
+    "query": {
+      "description": "Describe what you want in a full sentence.",
+      "type": "string"
+    },
+    "text_chars": {
+      "description": "Characters of page text per result (default 1500).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 100,
+      "nullable": true
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "query"
+  ]
+}
+{
+  "description": "T12: library documentation through Context7.",
+  "type": "object",
+  "properties": {
+    "library": {
+      "description": "Library name, e.g. \"tokio\" or \"react\".",
+      "type": "string"
+    },
+    "tokens": {
+      "description": "Tokens of documentation to return (default 4000).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 500,
+      "nullable": true
+    },
+    "topic": {
+      "description": "What to look up in the docs.",
+      "type": "string",
+      "nullable": true
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "library"
+  ]
+}
+{
+  "description": "T19: edit one cell of a Jupyter notebook.",
+  "type": "object",
+  "properties": {
+    "cell_id": {
+      "description": "The cell to edit or insert after: its id, or `index:N` (0-based).\nOmit with `insert` to insert at the top.",
+      "type": "string",
+      "nullable": true
+    },
+    "cell_type": {
+      "description": "code or markdown (insert; replace keeps the type when omitted).",
+      "type": "string",
+      "nullable": true
+    },
+    "edit_mode": {
+      "description": "replace (default), insert or delete.",
+      "type": "string",
+      "nullable": true
+    },
+    "file_path": {
+      "description": "The `.ipynb` file.",
+      "type": "string"
+    },
+    "new_source": {
+      "description": "New cell source (replace, insert).",
+      "type": "string",
+      "nullable": true
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "file_path"
+  ]
+}
+{
+  "description": "T25: convert one file for a wiki vault.",
+  "type": "object",
+  "properties": {
+    "file_path": {
+      "description": "File to convert.",
+      "type": "string"
+    },
+    "vault": {
+      "description": "Vault directory media is copied into (`<vault>/assets/`).",
+      "type": "string",
+      "nullable": true
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "file_path"
+  ]
+}
+{
+  "description": "T25: create or replace a wiki page.",
+  "type": "object",
+  "properties": {
+    "body": {
+      "description": "Page body (markdown, wikilinks welcome).",
+      "type": "string"
+    },
+    "kind": {
+      "description": "source, entity, concept or synthesis.",
+      "type": "string"
+    },
+    "overwrite": {
+      "description": "Replace an existing page.",
+      "type": "boolean"
+    },
+    "tags": {
+      "description": "Tags.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "nullable": true
+    },
+    "title": {
+      "description": "Page title.",
+      "type": "string"
+    },
+    "vault": {
+      "description": "Existing vault directory.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "vault",
+    "kind",
+    "title",
+    "body"
+  ]
+}
+{
+  "description": "T25: archive an ingested unit, log it and commit the vault.",
+  "type": "object",
+  "properties": {
+    "note": {
+      "description": "What was added, or why the unit was skipped.",
+      "type": "string"
+    },
+    "source": {
+      "description": "The ingested file under `<vault>/raw/` to archive.",
+      "type": "string"
+    },
+    "vault": {
+      "description": "Existing vault directory.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "vault",
+    "source",
+    "note"
   ]
 }

@@ -254,11 +254,14 @@ impl ToolErrorTracker {
         Self { errors: Default::default(), limit }
     }
 
+    /// Updates the counters from one batch of results. Only typed tool
+    /// errors count; refusals (unavailable tool, policy, jail, bans, hooks)
+    /// neither count nor reset the counter.
     pub fn adjust_record(&mut self, records: &[(ToolCallFull, ToolResult)]) -> &mut Self {
         let records_iter = records.iter();
         let failed = records_iter
             .clone()
-            .filter(|record| record.1.is_error())
+            .filter(|record| record.1.is_counted_error())
             .map(|record| &record.1.name)
             .collect::<Vec<_>>();
 

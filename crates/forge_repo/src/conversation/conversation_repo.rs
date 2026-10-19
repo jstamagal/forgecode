@@ -438,6 +438,31 @@ mod tests {
         Ok(())
     }
 
+    /// X29: tools loaded through tool_discovery and skills already offered
+    /// survive a save and reload of the conversation.
+    #[tokio::test]
+    async fn test_surface_state_survives_save_and_reload() -> anyhow::Result<()> {
+        let repo = repository()?;
+        let metrics = Metrics::default();
+        metrics.surface.with(|state| {
+            state.loaded.insert("native:lsp".to_string());
+            state.offered_skills.insert("proto".to_string());
+        });
+        let fixture = Conversation::generate().metrics(metrics.clone());
+
+        repo.upsert_conversation(fixture.clone()).await?;
+        let actual = repo
+            .get_conversation(&fixture.id)
+            .await?
+            .expect("Conversation should exist")
+            .metrics
+            .surface
+            .snapshot();
+
+        assert_eq!(actual, metrics.surface.snapshot());
+        Ok(())
+    }
+
     #[test]
     fn test_metrics_record_conversion_preserves_all_fields() {
         // This test ensures compile-time safety: if Metrics schema changes,
@@ -716,6 +741,7 @@ mod tests {
                 output: ToolOutput {
                     is_error: false,
                     values: vec![ToolValue::Text("Result text".to_string()), ToolValue::Empty],
+                    uncounted: false,
                 },
             })
             .into(),

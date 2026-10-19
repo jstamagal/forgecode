@@ -21,14 +21,8 @@ enum Operation<'a> {
     Shell(&'a str),
     /// Search operation with a specific pattern
     Search(&'a str),
-    /// Codebase search operation with queries
-    CodebaseSearch {
-        queries: &'a [forge_domain::SearchQuery],
-    },
     /// Fetch operation for a specific URL
     Fetch(&'a str),
-    /// Follow-up question
-    Followup(&'a str),
     /// Plan creation with a specific name
     Plan(&'a str),
     /// Skill loading by name
@@ -53,9 +47,7 @@ fn to_op(tool: &SummaryTool) -> Operation<'_> {
         SummaryTool::Undo { path } => Operation::File(path),
         SummaryTool::Shell { command } => Operation::Shell(command),
         SummaryTool::Search { pattern } => Operation::Search(pattern),
-        SummaryTool::SemSearch { queries } => Operation::CodebaseSearch { queries },
         SummaryTool::Fetch { url } => Operation::Fetch(url),
-        SummaryTool::Followup { question } => Operation::Followup(question),
         SummaryTool::Plan { plan_name } => Operation::Plan(plan_name),
         SummaryTool::Skill { name } => Operation::Skill(name),
         SummaryTool::Task { agent_id } => Operation::Task(agent_id),

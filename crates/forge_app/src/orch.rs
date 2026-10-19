@@ -14,6 +14,94 @@ use crate::agent::AgentService;
 use crate::transformers::{DropReasoningOnlyMessages, ModelSpecificReasoning};
 use crate::{EnvironmentInfra, TemplateEngine};
 
+/// X12: budget for all tool results of one assistant message.
+const MAX_BATCH_RESULT_BYTES: usize = 200 * 1024;
+
+/// X6: splits `indices` (model order) into groups that run together:
+/// consecutive read-only calls form one group; any other call is a group of
+/// its own.
+fn readers_writer_groups(indices: &[usize], read_only: impl Fn(usize) -> bool) -> Vec<Vec<usize>> {
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut readers: Vec<usize> = Vec::new();
+    for &index in indices {
+        if read_only(index) {
+            readers.push(index);
+        } else {
+            if !readers.is_empty() {
+                groups.push(std::mem::take(&mut readers));
+            }
+            groups.push(vec![index]);
+        }
+    }
+    if !readers.is_empty() {
+        groups.push(readers);
+    }
+    groups
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    #[test]
+    fn test_readers_writer_groups_split_at_writers() {
+        // r r w r r r w
+        let read_only = [true, true, false, true, true, true, false];
+        let actual = readers_writer_groups(&[0, 1, 2, 3, 4, 5, 6], |i| read_only[i]);
+        let expected = vec![vec![0, 1], vec![2], vec![3, 4, 5], vec![6]];
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_resolve_surface_name_handles_case_alias_and_mcp_forms() {
+        let surface = vec![
+            ToolDefinition::new("read"),
+            ToolDefinition::new("fs_search"),
+            ToolDefinition::new("mcp_github_tool_list_issues"),
+        ];
+        let actual = (
+            resolve_surface_name(&ToolName::new("Read"), &surface),
+            resolve_surface_name(&ToolName::new("search"), &surface),
+            resolve_surface_name(&ToolName::new("mcp__github__list_issues"), &surface),
+            resolve_surface_name(&ToolName::new("nope"), &surface),
+        );
+        let expected = (
+            Some(ToolName::new("read")),
+            Some(ToolName::new("fs_search")),
+            Some(ToolName::new("mcp_github_tool_list_issues")),
+            None,
+        );
+        assert_eq!(actual, expected);
+    }
+}
+
+/// The surface name a called name resolves to: exact, then case-insensitive
+/// native names and the deprecated `search` alias, then the MCP name forms.
+/// The surface holds every tool resolved for the agent (native, agents, MCP).
+fn resolve_surface_name(name: &ToolName, surface: &[ToolDefinition]) -> Option<ToolName> {
+    if surface.iter().any(|tool| &tool.name == name) {
+        return Some(name.clone());
+    }
+    let lowered = name.as_str().trim().to_lowercase();
+    let alias = match lowered.as_str() {
+        "search" => "fs_search".to_string(),
+        other => other.to_string(),
+    };
+    if let Some(tool) = surface
+        .iter()
+        .find(|tool| tool.name.as_str().to_lowercase() == alias)
+    {
+        return Some(tool.name.clone());
+    }
+    let legacy = name.to_legacy_mcp_name()?;
+    surface
+        .iter()
+        .find(|tool| tool.name == legacy)
+        .map(|tool| tool.name.clone())
+}
+
 #[derive(Clone, Setters)]
 #[setters(into)]
 pub struct Orchestrator<S> {
@@ -26,6 +114,14 @@ pub struct Orchestrator<S> {
     error_tracker: ToolErrorTracker,
     hook: Arc<Hook>,
     config: forge_config::ForgeConfig,
+    /// `task` nesting depth of this conversation (0 = the user's own).
+    task_depth: usize,
+    /// The request's tool surface (T24). When it holds tools, every request
+    /// publishes `surface.published(state)`, so a tool loaded through
+    /// `tool_discovery` appears from the next model call.
+    surface: forge_domain::SharedSurface,
+    /// Model-facing tool names (X23); history keeps canonical names.
+    aliases: forge_domain::AliasMap,
 }
 
 impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orchestrator<S> {
@@ -45,7 +141,21 @@ impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orc
             models: Default::default(),
             error_tracker: Default::default(),
             hook: Arc::new(Hook::default()),
+            task_depth: 0,
+            surface: Default::default(),
+            aliases: Default::default(),
         }
+    }
+
+    /// Re-derives the published tool definitions from the surface and the
+    /// conversation's surface state (canonical names).
+    fn refresh_tool_definitions(&mut self, tool_context: &ToolCallContext) -> anyhow::Result<()> {
+        if self.surface.with(|data| data.tools.is_empty()) {
+            return Ok(());
+        }
+        let state = tool_context.surface_state()?.snapshot();
+        self.tool_definitions = self.surface.published(&state);
+        Ok(())
     }
 
     /// Get a reference to the internal conversation
@@ -54,12 +164,18 @@ impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orc
     }
 
     // Helper function to get all tool results from a vector of tool calls
+    //
+    // X6: `task` calls run first, concurrently. The other calls then run in
+    // model order under a readers–writer rule: consecutive read-only calls run
+    // together (at most `MAX_PARALLEL_TOOLS` at once) and any other call runs
+    // alone as a barrier. Results come back in the model's order.
     #[async_recursion]
     async fn execute_tool_calls(
         &mut self,
         tool_calls: &[ToolCallFull],
         tool_context: &ToolCallContext,
     ) -> anyhow::Result<Vec<(ToolCallFull, ToolResult)>> {
+        const MAX_PARALLEL_TOOLS: usize = 8;
         let task_tool_name = ToolKind::Task.name();
 
         // Use a case-insensitive comparison since the model may send "Task" or
@@ -70,105 +186,147 @@ impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orc
                 .eq_ignore_ascii_case(task_tool_name.as_str())
         };
 
-        // Partition into task tool calls (run in parallel) and all others (run
-        // sequentially). Use a case-insensitive comparison since the model may
-        // send "Task" or "task".
-        let is_task_call =
-            |tc: &&ToolCallFull| tc.name.as_str().to_lowercase() == task_tool_name.as_str();
-        let (task_calls, other_calls): (Vec<_>, Vec<_>) = tool_calls.iter().partition(is_task_call);
+        let mut records: Vec<Option<ToolResult>> = vec![None; tool_calls.len()];
 
         // Execute task tool calls in parallel — mirrors how direct
         // agent-as-tool calls work.
-        let task_results: Vec<(ToolCallFull, ToolResult)> = join_all(
-            task_calls
-                .iter()
-                .map(|tc| self.services.call(&self.agent, tool_context, (*tc).clone())),
-        )
-        .await
-        .into_iter()
-        .zip(task_calls.iter())
-        .map(|(result, tc)| ((*tc).clone(), result))
-        .collect();
+        let task_indices: Vec<usize> = (0..tool_calls.len())
+            .filter(|&i| is_task(&tool_calls[i]))
+            .collect();
+        let task_results = join_all(task_indices.iter().map(|&i| {
+            self.services
+                .call(&self.agent, tool_context, tool_calls[i].clone())
+        }))
+        .await;
+        for (index, result) in task_indices.iter().zip(task_results) {
+            records[*index] = Some(result);
+        }
 
         let system_tools = self
             .tool_definitions
             .iter()
-            .map(|tool| &tool.name)
+            .map(|tool| tool.name.clone())
             .collect::<HashSet<_>>();
 
-        // Process non-task tool calls sequentially (preserving UI notifier
-        // handshake and hooks).
-        let mut other_results: Vec<(ToolCallFull, ToolResult)> =
-            Vec::with_capacity(other_calls.len());
-        for tool_call in &other_calls {
-            // Send the start notification for system tools and not agent as a
-            // tool
+        let leaves: Vec<usize> = (0..tool_calls.len())
+            .filter(|&i| !is_task(&tool_calls[i]))
+            .collect();
+        let read_only = |call: &ToolCallFull| {
+            ToolCatalog::try_from(call.clone()).is_ok_and(|tool| tool.is_read_only())
+        };
+        for group in readers_writer_groups(&leaves, |i| read_only(&tool_calls[i])) {
+            if group.len() == 1 {
+                let index = group[0];
+                let result = self
+                    .run_leaf(&tool_calls[index], tool_context, &system_tools)
+                    .await?;
+                records[index] = Some(result);
+                continue;
+            }
+            for chunk in group.chunks(MAX_PARALLEL_TOOLS) {
+                let started = self
+                    .start_leaves(chunk.iter().map(|&i| &tool_calls[i]), &system_tools)
+                    .await?;
+                let results = join_all(chunk.iter().map(|&i| {
+                    self.services
+                        .call(&self.agent, tool_context, tool_calls[i].clone())
+                }))
+                .await;
+                for ((&index, result), is_system_tool) in chunk.iter().zip(results).zip(started) {
+                    self.finish_leaf(&tool_calls[index], &result, is_system_tool)
+                        .await?;
+                    records[index] = Some(result);
+                }
+            }
+        }
+
+        Ok(tool_calls
+            .iter()
+            .cloned()
+            .zip(records)
+            .map(|(call, result)| {
+                let result = result.unwrap_or_else(|| {
+                    ToolResult::from(call.clone())
+                        .output(Ok(ToolOutput::text(ORPHAN_RESULT).is_error(true)))
+                });
+                (call, result)
+            })
+            .collect())
+    }
+
+    /// Sends start notifications and lifecycle events for calls about to run
+    /// together; returns, per call, whether it is a system tool.
+    async fn start_leaves<'a>(
+        &mut self,
+        calls: impl Iterator<Item = &'a ToolCallFull>,
+        system_tools: &HashSet<ToolName>,
+    ) -> anyhow::Result<Vec<bool>> {
+        let mut started = Vec::new();
+        for tool_call in calls {
             let is_system_tool = system_tools.contains(&tool_call.name);
             if is_system_tool {
                 let notifier = Arc::new(Notify::new());
                 self.send(ChatResponse::ToolCallStart {
-                    tool_call: (*tool_call).clone(),
+                    tool_call: tool_call.clone(),
                     notifier: notifier.clone(),
                 })
                 .await?;
                 // Wait for the UI to acknowledge it has rendered the tool
-                // header before we execute the tool. This
-                // prevents tool stdout from appearing before
-                // the tool name is printed.
+                // header before we execute the tool.
                 notifier.notified().await;
             }
-
-            // Fire the ToolcallStart lifecycle event
             let toolcall_start_event = LifecycleEvent::ToolcallStart(EventData::new(
                 self.agent.clone(),
                 self.agent.model.clone(),
-                ToolcallStartPayload::new((*tool_call).clone()),
+                ToolcallStartPayload::new(tool_call.clone()),
             ));
             self.hook
                 .handle(&toolcall_start_event, &mut self.conversation)
                 .await?;
-
-            // Execute the tool
-            let tool_result = self
-                .services
-                .call(&self.agent, tool_context, (*tool_call).clone())
-                .await;
-
-            // Fire the ToolcallEnd lifecycle event (fires on both success and
-            // failure)
-            let toolcall_end_event = LifecycleEvent::ToolcallEnd(EventData::new(
-                self.agent.clone(),
-                self.agent.model.clone(),
-                ToolcallEndPayload::new((*tool_call).clone(), tool_result.clone()),
-            ));
-            self.hook
-                .handle(&toolcall_end_event, &mut self.conversation)
-                .await?;
-
-            // Send the end notification for system tools and not agent as a
-            // tool
-            if is_system_tool {
-                self.send(ChatResponse::ToolCallEnd(tool_result.clone()))
-                    .await?;
-            }
-            other_results.push(((*tool_call).clone(), tool_result));
+            started.push(is_system_tool);
         }
+        Ok(started)
+    }
 
-        // Reconstruct results in the original order of tool_calls.
-        let mut task_iter = task_results.into_iter();
-        let mut other_iter = other_results.into_iter();
-        let tool_call_records = tool_calls
-            .iter()
-            .map(|tc| {
-                if is_task(tc) {
-                    task_iter.next().expect("task result count mismatch")
-                } else {
-                    other_iter.next().expect("other result count mismatch")
-                }
-            })
-            .collect();
+    /// Fires the end lifecycle event and the end notification for one call.
+    async fn finish_leaf(
+        &mut self,
+        tool_call: &ToolCallFull,
+        tool_result: &ToolResult,
+        is_system_tool: bool,
+    ) -> anyhow::Result<()> {
+        let toolcall_end_event = LifecycleEvent::ToolcallEnd(EventData::new(
+            self.agent.clone(),
+            self.agent.model.clone(),
+            ToolcallEndPayload::new(tool_call.clone(), tool_result.clone()),
+        ));
+        self.hook
+            .handle(&toolcall_end_event, &mut self.conversation)
+            .await?;
+        if is_system_tool {
+            self.send(ChatResponse::ToolCallEnd(tool_result.clone()))
+                .await?;
+        }
+        Ok(())
+    }
 
-        Ok(tool_call_records)
+    /// Runs one call alone (start events, execution, end events).
+    async fn run_leaf(
+        &mut self,
+        tool_call: &ToolCallFull,
+        tool_context: &ToolCallContext,
+        system_tools: &HashSet<ToolName>,
+    ) -> anyhow::Result<ToolResult> {
+        let started = self
+            .start_leaves(std::iter::once(tool_call), system_tools)
+            .await?;
+        let tool_result = self
+            .services
+            .call(&self.agent, tool_context, tool_call.clone())
+            .await;
+        self.finish_leaf(tool_call, &tool_result, started[0])
+            .await?;
+        Ok(tool_result)
     }
 
     async fn send(&self, message: ChatResponse) -> anyhow::Result<()> {
@@ -206,6 +364,8 @@ impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orc
     ) -> anyhow::Result<ChatCompletionMessageFull> {
         let tool_supported = self.is_tool_supported()?;
         let mut transformers = DefaultTransformation::default()
+            // X28: every assistant tool call gets exactly one result.
+            .pipe(HealOrphanedToolCalls::new())
             .pipe(SortTools::new(self.agent.tool_order()))
             .pipe(NormalizeToolCallArguments::new())
             .pipe(TransformToolCalls::new().when(|_| !tool_supported))
@@ -256,6 +416,8 @@ impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orc
         self.hook
             .handle(&start_event, &mut self.conversation)
             .await?;
+        self.run_turn_hooks(forge_config::HookEvent::TurnStart)
+            .await;
 
         // Signals that the loop should suspend (task may or may not be
         // completed)
@@ -268,13 +430,30 @@ impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orc
 
         // Retrieve the number of requests allowed per tick.
         let max_requests_per_turn = self.agent.max_requests_per_turn;
-        let tool_context =
-            ToolCallContext::new(self.conversation.metrics.clone()).sender(self.sender.clone());
+        let tool_context = ToolCallContext::new(self.conversation.metrics.clone())
+            .sender(self.sender.clone())
+            .with_conversation_id(self.conversation.id)
+            .with_task_depth(self.task_depth)
+            .with_surface(self.surface.clone());
 
         while !should_yield {
+            // T24: tools loaded by the previous batch are published from this
+            // request on; the request carries the model-facing (aliased) names.
+            self.refresh_tool_definitions(&tool_context)?;
+            if !self.surface.with(|data| data.tools.is_empty()) {
+                context = context.tools(crate::tool_surface::apply_aliases(
+                    self.tool_definitions.clone(),
+                    &self.aliases,
+                ));
+            }
+
             // Set context for the current loop iteration
             self.conversation.context = Some(context.clone());
             self.services.update(self.conversation.clone()).await?;
+
+            // A shown read whose result was compacted away no longer backs a
+            // repeat-read stub.
+            crate::read_tracking::keep_shown_in_context(&tool_context, &context)?;
 
             let request_event = LifecycleEvent::Request(EventData::new(
                 self.agent.clone(),
@@ -316,6 +495,22 @@ impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orc
             )
             .await?;
 
+            // X19: compaction runs inside the Response handler; pre_compact
+            // fires when it is about to, post_compact when it happened.
+            let will_compact = self.conversation.context.as_ref().is_some_and(|context| {
+                self.agent
+                    .compact
+                    .should_compact(context, *context.token_count())
+            });
+            let messages_before = self.conversation.len();
+            if will_compact {
+                self.run_observer_hooks(
+                    forge_config::HookEvent::PreCompact,
+                    serde_json::json!({"messages": messages_before}),
+                )
+                .await;
+            }
+
             // Fire the Response lifecycle event
             let response_event = LifecycleEvent::Response(EventData::new(
                 self.agent.clone(),
@@ -325,23 +520,128 @@ impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orc
             self.hook
                 .handle(&response_event, &mut self.conversation)
                 .await?;
+            if will_compact && self.conversation.len() < messages_before {
+                self.run_observer_hooks(
+                    forge_config::HookEvent::PostCompact,
+                    serde_json::json!({
+                        "messages_before": messages_before,
+                        "messages_after": self.conversation.len(),
+                    }),
+                )
+                .await;
+            }
+            self.run_observer_hooks(
+                forge_config::HookEvent::Response,
+                serde_json::json!({
+                    "content": message.content,
+                    "tool_calls": message.tool_calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+                }),
+            )
+            .await;
 
             // Turn is completed, if finish_reason is 'stop'. Gemini models
             // return stop as finish reason with tool calls.
             is_complete =
                 message.finish_reason == Some(FinishReason::Stop) && message.tool_calls.is_empty();
 
-            // Should yield if a tool is asking for a follow-up
-            should_yield = is_complete
-                || message
-                    .tool_calls
-                    .iter()
-                    .any(|call| ToolCatalog::should_yield(&call.name));
+            should_yield = is_complete;
+
+            // X5: a reply cut off by its output cap with unfinished call
+            // arguments runs nothing; the model is told why.
+            let mut message = message;
+            let mut batch_notice: Option<String> = None;
+            if let Some(notice) =
+                truncated_call_notice(message.finish_reason.as_ref(), &message.tool_calls)
+            {
+                message.tool_calls.clear();
+                batch_notice = Some(notice);
+            }
+
+            // X23: aliased call names map back to canonical names; history
+            // and dispatch only ever see canonical names.
+            if !self.aliases.is_empty() {
+                for call in message.tool_calls.iter_mut() {
+                    call.name = crate::tool_surface::canonical_name(&call.name, &self.aliases);
+                }
+            }
+
+            // X4: drop duplicates, cap the batch, canonicalise names and
+            // arguments, and reject unavailable tools and invalid arguments
+            // before any call runs.
+            let surface = self.tool_definitions.clone();
+            let surface_state = tool_context.surface_state()?.snapshot();
+            let shared = self.surface.clone();
+            let batch = normalize_batch(
+                &message.tool_calls,
+                &surface,
+                |name| resolve_surface_name(name, &surface),
+                |name| shared.absent(name, &surface_state),
+            );
+            if let Some(notice) = &batch.notice {
+                batch_notice = Some(match batch_notice {
+                    Some(previous) => format!("{previous}\n\n{notice}"),
+                    None => notice.clone(),
+                });
+            }
+            let runnable: Vec<ToolCallFull> = batch
+                .calls
+                .iter()
+                .filter(|call| call.rejection.is_none())
+                .map(|call| call.call.clone())
+                .collect();
 
             // Process tool calls and update context
-            let mut tool_call_records = self
-                .execute_tool_calls(&message.tool_calls, &tool_context)
-                .await?;
+            let executed = self.execute_tool_calls(&runnable, &tool_context).await?;
+            let mut executed = executed.into_iter();
+            let mut tool_call_records: Vec<(ToolCallFull, ToolResult)> = batch
+                .calls
+                .into_iter()
+                .map(|normalized| match normalized.rejection {
+                    None => executed.next().expect("one result per runnable call"),
+                    Some(rejection) => {
+                        let error = match rejection {
+                            CallRejection::Unavailable(message) => {
+                                anyhow::Error::new(ToolRefusal(message))
+                            }
+                            CallRejection::InvalidArguments(message) => anyhow::anyhow!(message),
+                        };
+                        let result = ToolResult::from(normalized.call.clone()).failure(error);
+                        (normalized.call, result)
+                    }
+                })
+                .collect();
+
+            // X12: hold the whole batch to the per-message budget.
+            let mut results: Vec<ToolResult> = tool_call_records
+                .iter()
+                .map(|(_, result)| result.clone())
+                .collect();
+            let originals: Vec<Option<String>> = results
+                .iter()
+                .map(|result| result.output.as_str().map(str::to_string))
+                .collect();
+            crate::result_bounds::bound_batch(&mut results, MAX_BATCH_RESULT_BYTES);
+            let ledger = tool_context.reads()?;
+            for ((record, result), original) in
+                tool_call_records.iter_mut().zip(results).zip(originals)
+            {
+                if let (Some(original), Some(delivered), Some(call_id)) =
+                    (original, result.output.as_str(), result.call_id.as_ref())
+                {
+                    crate::result_bounds::narrow_read_coverage(
+                        &ledger,
+                        call_id.as_str(),
+                        &original,
+                        delivered,
+                    );
+                }
+                record.1 = result;
+            }
+
+            // Reads delivered in this batch become "shown"; a later exact
+            // repeat is answered with a stub while the result stays in the
+            // conversation.
+            crate::read_tracking::settle_batch(&tool_context, &tool_call_records)?;
 
             // Update context from conversation after response / tool-call hooks
             // run
@@ -351,6 +651,18 @@ impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orc
 
             self.error_tracker.adjust_record(&tool_call_records);
             let allowed_max_attempts = self.error_tracker.limit();
+            let failed: Vec<String> = tool_call_records
+                .iter()
+                .filter(|(_, result)| result.is_error())
+                .map(|(_, result)| result.name.to_string())
+                .collect();
+            if !failed.is_empty() {
+                self.run_observer_hooks(
+                    forge_config::HookEvent::Error,
+                    serde_json::json!({"failed_tools": failed}),
+                )
+                .await;
+            }
             for (_, result) in tool_call_records.iter_mut() {
                 if result.is_error() {
                     let attempts_left = self.error_tracker.remaining_attempts(&result.name);
@@ -369,7 +681,11 @@ impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orc
             }
 
             context = context.append_message(
-                message.content.clone(),
+                match &batch_notice {
+                    Some(notice) if message.content.is_empty() => notice.clone(),
+                    Some(notice) => format!("{}\n\n{notice}", message.content),
+                    None => message.content.clone(),
+                },
                 message.thought_signature.clone(),
                 message.reasoning.clone(),
                 message.reasoning_details.clone(),
@@ -452,6 +768,7 @@ impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orc
         }
 
         self.services.update(self.conversation.clone()).await?;
+        self.run_turn_hooks(forge_config::HookEvent::TurnEnd).await;
 
         // Signal Task Completion
         if is_complete {
@@ -459,6 +776,39 @@ impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orc
         }
 
         Ok(())
+    }
+
+    /// X19: runs the observing user hooks of `event` (exit status ignored).
+    /// X25: a `task` worker inherits only the refusing (`tool_call`) hooks,
+    /// so observers run for the user's own conversation only.
+    async fn run_turn_hooks(&self, event: forge_config::HookEvent) {
+        self.run_observer_hooks(event, serde_json::json!({})).await;
+    }
+
+    async fn run_observer_hooks(&self, event: forge_config::HookEvent, extra: serde_json::Value) {
+        if self.task_depth > 0 {
+            return;
+        }
+        let hooks: Vec<&forge_config::UserHook> =
+            crate::user_hooks::matching(&self.config.hooks, event, None).collect();
+        if hooks.is_empty() {
+            return;
+        }
+        let cwd = self.services.get_environment().cwd;
+        let mut payload = serde_json::json!({
+            "hook_event_name": event.name(),
+            "session_id": self.conversation.id.to_string(),
+            "agent_id": self.agent.id.as_str(),
+            "cwd": cwd,
+        });
+        if let (Some(map), serde_json::Value::Object(extra)) = (payload.as_object_mut(), extra) {
+            map.extend(extra);
+        }
+        for hook in hooks {
+            if let Err(error) = crate::user_hooks::run_and_queue(hook, &payload, &cwd).await {
+                tracing::warn!(command = %hook.command, %error, "hook failed to start");
+            }
+        }
     }
 
     fn get_model(&self) -> ModelId {

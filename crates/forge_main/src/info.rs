@@ -400,13 +400,13 @@ impl From<&ForgeConfig> for Info {
                     .map(|p| p.display().to_string()),
             )
             .add_key_value(
-                "Stdout Max Line Length",
-                config.max_stdout_line_chars.to_string(),
+                "Shell Output Budget",
+                format!("{} bytes", config.max_bash_output_bytes),
             )
             .add_title("SYSTEM CONFIGURATION")
             .add_key_value(
-                "Max Search Result Bytes",
-                format!("{} bytes", config.max_search_result_bytes),
+                "Max Tool Result Inline Bytes",
+                format!("{} bytes", config.max_tool_result_inline_bytes),
             )
             .add_key_value("Max Conversations", config.max_conversations.to_string());
 

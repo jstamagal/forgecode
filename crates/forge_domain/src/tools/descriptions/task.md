@@ -1,67 +1,25 @@
-Launch a new agent to handle complex, multi-step tasks autonomously. 
+Launch one or more worker agents for complex, multi-step work. Each worker runs autonomously in its own conversation and returns one result to you; the result is not shown to the user, so summarize it in your reply.
 
-The {{tool_names.task}} tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
-
-Available agent types and the tools they have access to:
+Available agents and their tools:
 {{#each agents}}
 - **{{id}}**{{#if description}}: {{description}}{{/if}}{{#if tools}}
   - Tools: {{#each tools}}{{this}}{{#unless @last}}, {{/unless}}{{/each}}{{/if}}
 {{/each}}
 
-When using the {{tool_names.task}} tool, you must specify a agent_id parameter to select which agent type to use.
+When to use: open-ended searches that need several search/read rounds, independent investigations that can run concurrently, work that suits another agent's persona and tools.
+When not to use: anything one or two direct tool calls finish{{#if tool_names.read}}, such as reading one known file or two or three files (use `{{tool_names.read}}`){{/if}}{{#if tool_names.fs_search}}, or searching for an exact identifier or definition (use `{{tool_names.fs_search}}`){{/if}}.
 
-When NOT to use the {{tool_names.task}} tool:
-- If you want to read a specific file path, use the {{tool_names.read}} or {{tool_names.fs_search}} tool instead of the {{tool_names.task}} tool, to find the match more quickly
-- If you are searching for a specific class definition like "class Foo", use the {{tool_names.fs_search}} tool instead, to find the match more quickly
-- If you are searching for code within a specific file or set of 2-3 files, use the {{tool_names.read}} tool instead of the {{tool_names.task}} tool, to find the match more quickly
-- Other tasks that are not related to the agent descriptions above
+Inputs:
+- `tasks` (required to start workers): one self-contained prompt per worker. A fresh worker cannot see this conversation; include paths, error text, constraints, the expected output shape, and whether it may change code.
+- `agent_id` (required to start workers): the agent the workers run as. An unknown agent is an error and no worker starts.
+- `session_id`: resume a worker session (the id is named in an earlier result as `session_id=…`). It runs exactly one task; an unknown id is an error.
+- `model`: run the workers on another model. Leave it unset unless the user asks for it.
 
+Parallelism: the tasks of one call run concurrently through a bounded worker pool, and several `{{tool_names.task}}` calls in one response also run concurrently. One task returns the worker's reply verbatim; several come back numbered under a `TASK_RESULTS` header in task order. A worker that fails reports its error in its own slot without discarding the others. Each reply is held to an equal share of the result budget. Workers that start their own tasks run one level deeper; past the configured depth limit a call is refused.
 
-Usage notes:
-- Always include a short description (3-5 words) summarizing what the agent will do
-- Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses
-- When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.
-- Agents can be resumed using the \`session_id\` parameter by passing the agent ID from a previous invocation. When resumed, the agent continues with its full previous context preserved. When NOT resuming, each invocation starts fresh and you should provide a detailed task description with all necessary context.
-- When the agent is done, it will return a single message back to you along with its agent ID. You can use this ID to resume the agent later if needed for follow-up work.
-- Provide clear, detailed prompts so the agent can work autonomously and return exactly the information you need.
-- Agents with "access to current context" can see the full conversation history before the tool call. When using these agents, you can write concise prompts that reference earlier context (e.g., "investigate the error discussed above") instead of repeating information. The agent will receive all prior messages and understand the context.
-- The agent's outputs should generally be trusted
-- Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
-- If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
-- If the user specifies that they want you to run agents "in parallel", you MUST send a single message with multiple {{tool_names.task}} tool use content blocks. For example, if you need to launch both a build-validator agent and a test-runner agent in parallel, send a single message with both tool calls.
+Background: a call blocks until every worker finishes. With `background=true` it returns at once with a handle while the workers keep running:
 
-Example usage:
+    task running in the background (handle t1): ...
+    HANDLE t1 RUNNING
 
-<example_agent_descriptions>
-"test-runner": use this agent after you are done writing code to run tests
-"greeting-responder": use this agent when to respond to user greetings with a friendly joke
-</example_agent_description>
-
-<example>
-user: "Please write a function that checks if a number is prime"
-assistant: Sure let me write a function that checks if a number is prime
-assistant: First let me use the {{tool_names.write}} tool to write a function that checks if a number is prime
-assistant: I'm going to use the {{tool_names.write}} tool to write the following code:
-<code>
-function isPrime(n) {
-  if (n <= 1) return false
-  for (let i = 2; i * i <= n; i++) {
-    if (n % i === 0) return false
-  }
-  return true
-}
-</code>
-<commentary>
-Since a significant piece of code was written and the task was completed, now use the test-runner agent to run the tests
-</commentary>
-assistant: Now let me use the test-runner agent to run the tests
-assistant: Uses the {{tool_names.task}} tool to launch the test-runner agent
-</example>
-
-<example>
-user: "Hello"
-<commentary>
-Since the user is greeting, use the greeting-responder agent to respond with a friendly joke
-</commentary>
-assistant: "I'm going to use the {{tool_names.task}} tool to launch the greeting-responder agent"
-</example>
+`action="poll", handle="t1"` says whether it is still running and returns the result once done; `action="wait", handle="t1", timeout=N` blocks up to N seconds, or until the end without `timeout`; `action="kill", handle="t1"` stops it. `handle` defaults to your most recent running task, and you see only tasks this conversation started. The finished result is also written to the file the handle names, and if you have not polled it by your next turn, a reminder names that file. Use background runs for slow, independent work you do not need before your next step.

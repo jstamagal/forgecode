@@ -1,8 +1,12 @@
-Performs exact string replacements in files.
-Usage:
-- You must use your `{{tool_names.read}}` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file. 
-- When editing text from `{{tool_names.read}}` tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: 'line_number:'. Everything after that line_number: is the actual file content to match. Never include any part of the line number prefix in the old_string or new_string.
-- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
-- Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.
-- The edit will FAIL if `old_string` is not unique in the file. Either provide a larger string with more surrounding context to make it unique or use `replace_all` to change every instance of `old_string`. 
-- Use `replace_all` for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance.
+Replace exact text in one file.
+- Read the file{{#if tool_names.read}} with `{{tool_names.read}}`{{/if}} before editing it; editing a file this conversation has not read is refused. The `12:` prefix in read output is not file content; only the text after it is.
+- `old_string` must match exactly once unless `replace_all` is set. When it is not in the file exactly, it is matched again with smart quotes, Unicode dashes, no-break spaces and trailing whitespace read as plain ASCII; the file keeps its own characters wherever your edit left `old_string` unchanged. With `replace_all`, this fallback runs only when there is no exact occurrence. A miss reports the closest line in the file.
+- Pass `edits` (a list of `{old_string, new_string, replace_all}`) for several replacements in one call: they apply in order, each seeing the previous result, and all are validated before anything is written, so a failed call leaves the file untouched and names the offending edit. Never combine `edits` with the scalar `old_string`/`new_string`/`replace_all` form.
+- Line endings in `old_string`/`new_string` are matched and written in the file's own style (LF or CRLF).
+- After the write, the file is parsed locally and any syntax errors the edit introduced are reported as a warning.
+{{#if tool_names.undo}}
+- One call is one `{{tool_names.undo}}` step.
+{{/if}}
+{{#if tool_names.write}}
+- Use `{{tool_names.write}}` for new files or a deliberate full rewrite.
+{{/if}}

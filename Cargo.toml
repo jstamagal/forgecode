@@ -16,6 +16,8 @@ strip = true
 
 [workspace.dependencies]
 anyhow = "1.0.102"
+ast-grep-core = "0.45.3"
+ast-grep-language = "0.45.3"
 async-recursion = "1.1.1"
 async-stream = "0.3"
 async-trait = "0.1.89"
@@ -50,6 +52,10 @@ handlebars = "6.4.0"
 html2md = "=0.2.15"
 http = "1.2.0"
 ignore = "0.4.23"
+image = { version = "0.25", default-features = false, features = ["png"] }
+ab_glyph = "0.2"
+portable-pty = "0.9"
+vt100 = "0.16"
 is_ci = "1.2.0"
 indexmap = "2.13.0"
 infer = "0.22.0"

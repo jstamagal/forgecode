@@ -1034,7 +1034,7 @@ mod tests {
     #[test]
     fn test_coerce_multi_patch_python_style() {
         // Test coercing exact Python-style input from error
-        // This matches multi_patch tool call format with nested objects
+        // This matches a batch patch (`edits`) call format with nested objects
         let python_style = r#"[{'content': 'use schemars::schema::{InstanceType, RootSchema, Schema, SchemaObject, SingleOrVec};', 'operation': 'replace', 'path': 'crates/forge_json_repair/src/schema_coercion.rs'}, {'content': 'fn coerce_value_with_schema(value: Value, schema: &Schema) -> Value {', 'operation': 'replace', 'path': 'crates/forge_json_repair/src/schema_coercion.rs'}]"#;
 
         let fixture = json!({"edits": python_style});

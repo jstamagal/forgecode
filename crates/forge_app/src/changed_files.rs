@@ -120,6 +120,14 @@ mod tests {
                 })
                 .ok_or_else(|| anyhow::anyhow!(std::io::Error::from(std::io::ErrorKind::NotFound)))
         }
+
+        async fn read_tool(
+            &self,
+            _: crate::ReadRequest,
+            _: &forge_domain::ToolCallContext,
+        ) -> anyhow::Result<ReadOutput> {
+            unimplemented!()
+        }
     }
 
     impl EnvironmentInfra for TestServices {

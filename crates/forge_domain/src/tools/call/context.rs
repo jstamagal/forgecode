@@ -2,19 +2,123 @@ use std::sync::{Arc, Mutex};
 
 use derive_setters::Setters;
 
-use crate::{ArcSender, ChatResponse, Metrics, TitleFormat, Todo, TodoItem};
+use crate::{
+    ArcSender, ChatResponse, ConversationId, Metrics, SharedLedger, SharedSurface,
+    SharedSurfaceState, TitleFormat, Todo, TodoItem,
+};
 
 /// Provides additional context for tool calls.
 #[derive(Debug, Clone, Setters)]
 pub struct ToolCallContext {
     sender: Option<ArcSender>,
     metrics: Arc<Mutex<Metrics>>,
+    /// Conversation the call belongs to (owns the undo stacks).
+    #[setters(skip)]
+    conversation_id: ConversationId,
+    /// Id of the tool call being executed, when known.
+    #[setters(skip)]
+    call_id: Option<String>,
+    /// Whether the current model accepts image input.
+    #[setters(skip)]
+    vision: bool,
+    /// How many `task` levels deep the conversation runs (0 = the user's own).
+    #[setters(skip)]
+    task_depth: usize,
+    /// The tool surface of the current request (catalog for
+    /// `tool_discovery`).
+    #[setters(skip)]
+    surface: SharedSurface,
 }
 
 impl ToolCallContext {
     /// Creates a new ToolCallContext with default values
     pub fn new(metrics: Metrics) -> Self {
-        Self { sender: None, metrics: Arc::new(Mutex::new(metrics)) }
+        Self {
+            sender: None,
+            metrics: Arc::new(Mutex::new(metrics)),
+            conversation_id: ConversationId::default(),
+            call_id: None,
+            vision: false,
+            task_depth: 0,
+            surface: SharedSurface::default(),
+        }
+    }
+
+    /// Binds the context to the request's tool surface.
+    pub fn with_surface(mut self, surface: SharedSurface) -> Self {
+        self.surface = surface;
+        self
+    }
+
+    /// The request's tool surface.
+    pub fn surface(&self) -> &SharedSurface {
+        &self.surface
+    }
+
+    /// The conversation's surface state (loaded tools, offered skills).
+    ///
+    /// # Errors
+    /// Returns an error if the metrics lock cannot be acquired.
+    pub fn surface_state(&self) -> anyhow::Result<SharedSurfaceState> {
+        self.with_metrics(|metrics| metrics.surface.clone())
+    }
+
+    /// Sets the `task` nesting depth of the conversation.
+    pub fn with_task_depth(mut self, task_depth: usize) -> Self {
+        self.task_depth = task_depth;
+        self
+    }
+
+    /// The `task` nesting depth of the conversation.
+    pub fn task_depth(&self) -> usize {
+        self.task_depth
+    }
+
+    /// Binds the context to a conversation.
+    pub fn with_conversation_id(mut self, conversation_id: ConversationId) -> Self {
+        self.conversation_id = conversation_id;
+        self
+    }
+
+    /// Binds the context to a tool call id.
+    pub fn with_call_id(mut self, call_id: impl Into<String>) -> Self {
+        self.call_id = Some(call_id.into());
+        self
+    }
+
+    /// Sets whether the current model accepts image input.
+    pub fn with_vision(mut self, vision: bool) -> Self {
+        self.vision = vision;
+        self
+    }
+
+    /// Whether the current model accepts image input.
+    pub fn vision(&self) -> bool {
+        self.vision
+    }
+
+    /// The conversation the call belongs to.
+    pub fn conversation_id(&self) -> &ConversationId {
+        &self.conversation_id
+    }
+
+    /// The id of the tool call being executed, if any.
+    pub fn call_id(&self) -> Option<&str> {
+        self.call_id.as_deref()
+    }
+
+    /// A copy of this context bound to another tool call id; it shares the
+    /// metrics and sender.
+    pub fn for_call(&self, call_id: Option<String>) -> Self {
+        Self { call_id, ..self.clone() }
+    }
+
+    /// The conversation's read ledger (shared, not a copy).
+    ///
+    /// # Errors
+    /// Returns an error if the metrics lock cannot be acquired.
+    pub fn reads(&self) -> anyhow::Result<SharedLedger> {
+        self.with_metrics(|metrics| metrics.reads.clone())
     }
 
     /// Send a message through the sender if available

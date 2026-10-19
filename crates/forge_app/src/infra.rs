@@ -199,6 +199,27 @@ pub trait UserInfra: Send + Sync {
     ) -> anyhow::Result<Option<Vec<T>>>;
 }
 
+/// A resource or prompt request to an MCP server (M3).
+#[derive(Debug, Clone, PartialEq)]
+pub enum McpControl {
+    ListResources,
+    ListResourceTemplates,
+    ReadResource {
+        uri: String,
+    },
+    Subscribe {
+        uri: String,
+    },
+    Unsubscribe {
+        uri: String,
+    },
+    ListPrompts,
+    GetPrompt {
+        name: String,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    },
+}
+
 #[async_trait::async_trait]
 pub trait McpClientInfra: Clone + Send + Sync + 'static {
     async fn list(&self) -> anyhow::Result<Vec<ToolDefinition>>;
@@ -207,6 +228,20 @@ pub trait McpClientInfra: Clone + Send + Sync + 'static {
         tool_name: &ToolName,
         input: serde_json::Value,
     ) -> anyhow::Result<ToolOutput>;
+
+    /// Sends a resource/prompt request and returns the server's result as
+    /// JSON. Read-type requests reconnect and retry on transport failure;
+    /// subscribe/unsubscribe are sent once.
+    ///
+    /// # Errors
+    /// Returns the server's or transport's error.
+    async fn control(&self, request: McpControl) -> anyhow::Result<serde_json::Value>;
+
+    /// Whether the server sent `notifications/tools/list_changed` since the
+    /// last call (M2); reading clears the flag.
+    fn take_tools_changed(&self) -> bool {
+        false
+    }
 }
 
 #[async_trait::async_trait]

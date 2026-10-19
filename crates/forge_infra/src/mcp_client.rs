@@ -10,7 +10,7 @@ use forge_domain::{
     Environment, Image, McpHttpServer, McpServerConfig, ToolDefinition, ToolName, ToolOutput,
 };
 use http::{HeaderName, HeaderValue};
-use rmcp::model::{CallToolRequestParams, ClientInfo, Implementation, InitializeRequestParams};
+use rmcp::model::{CallToolRequestParams, ClientInfo, Implementation};
 use rmcp::service::RunningService;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
@@ -27,7 +27,26 @@ const VERSION: &str = match option_env!("APP_VERSION") {
     None => env!("CARGO_PKG_VERSION"),
 };
 
-type RmcpClient = RunningService<RoleClient, InitializeRequestParams>;
+type RmcpClient = RunningService<RoleClient, ForgeClientHandler>;
+
+/// Client handler that records `notifications/tools/list_changed` (M2): the
+/// MCP service re-lists the server's tools before the next model call.
+#[derive(Clone)]
+pub struct ForgeClientHandler {
+    info: ClientInfo,
+    tools_changed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl rmcp::ClientHandler for ForgeClientHandler {
+    fn get_info(&self) -> ClientInfo {
+        self.info.clone()
+    }
+
+    async fn on_tool_list_changed(&self, _context: rmcp::service::NotificationContext<RoleClient>) {
+        self.tools_changed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
 
 #[derive(Clone)]
 pub struct ForgeMcpClient {
@@ -36,6 +55,7 @@ pub struct ForgeMcpClient {
     env_vars: BTreeMap<String, String>,
     environment: Environment,
     resolved_config: Arc<OnceLock<anyhow::Result<McpServerConfig>>>,
+    tools_changed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ForgeMcpClient {
@@ -50,6 +70,7 @@ impl ForgeMcpClient {
             env_vars: env_vars.clone(),
             environment,
             resolved_config: Arc::new(OnceLock::new()),
+            tools_changed: Default::default(),
         }
     }
 
@@ -66,8 +87,11 @@ impl ForgeMcpClient {
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
-    fn client_info(&self) -> ClientInfo {
-        ClientInfo::new(Default::default(), Implementation::new("Forge", VERSION))
+    fn client_info(&self) -> ForgeClientHandler {
+        ForgeClientHandler {
+            info: ClientInfo::new(Default::default(), Implementation::new("Forge", VERSION)),
+            tools_changed: self.tools_changed.clone(),
+        }
     }
 
     /// Connects to the MCP server. If `force` is true, it will reconnect even
@@ -531,9 +555,89 @@ impl McpClientInfra for ForgeMcpClient {
         self.attempt_with_retry(|| self.list()).await
     }
 
+    fn take_tools_changed(&self) -> bool {
+        self.tools_changed
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Calls a tool once, bounded by the server's `timeout` (default 300 s).
+    /// A `tools/call` is never retried: the server may already have acted on
+    /// it.
     async fn call(&self, tool_name: &ToolName, input: Value) -> anyhow::Result<ToolOutput> {
-        self.attempt_with_retry(|| self.call(tool_name, &input))
-            .await
+        let secs = match &self.config {
+            McpServerConfig::Stdio(server) => server.timeout,
+            McpServerConfig::Http(server) => server.timeout,
+        }
+        .unwrap_or(300);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(secs),
+            self.call(tool_name, &input),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("MCP tool {tool_name} timed out after {secs} seconds"))?
+    }
+
+    /// M3/M5: resource and prompt requests. Read-type requests reconnect and
+    /// retry with backoff on transport failure; subscribe/unsubscribe change
+    /// server state and are sent once.
+    async fn control(&self, request: forge_app::McpControl) -> anyhow::Result<Value> {
+        use forge_app::McpControl;
+        use rmcp::model::{
+            GetPromptRequestParams, ReadResourceRequestParams, SubscribeRequestParams,
+            UnsubscribeRequestParams,
+        };
+        match request {
+            McpControl::Subscribe { uri } => {
+                let client = self.connect().await?;
+                client
+                    .subscribe(SubscribeRequestParams::new(uri.clone()))
+                    .await?;
+                Ok(serde_json::json!({"uri": uri, "subscribed": true}))
+            }
+            McpControl::Unsubscribe { uri } => {
+                let client = self.connect().await?;
+                client
+                    .unsubscribe(UnsubscribeRequestParams::new(uri.clone()))
+                    .await?;
+                Ok(serde_json::json!({"uri": uri, "subscribed": false}))
+            }
+            read => {
+                self.attempt_with_retry(|| {
+                    let read = read.clone();
+                    async move {
+                        let client = self.connect().await?;
+                        let value = match read {
+                            McpControl::ListResources => {
+                                serde_json::to_value(client.list_all_resources().await?)?
+                            }
+                            McpControl::ListResourceTemplates => {
+                                serde_json::to_value(client.list_all_resource_templates().await?)?
+                            }
+                            McpControl::ReadResource { uri } => serde_json::to_value(
+                                client
+                                    .read_resource(ReadResourceRequestParams::new(uri))
+                                    .await?,
+                            )?,
+                            McpControl::ListPrompts => {
+                                serde_json::to_value(client.list_all_prompts().await?)?
+                            }
+                            McpControl::GetPrompt { name, arguments } => {
+                                let mut params = GetPromptRequestParams::new(name);
+                                if let Some(arguments) = arguments {
+                                    params = params.with_arguments(arguments);
+                                }
+                                serde_json::to_value(client.get_prompt(params).await?)?
+                            }
+                            McpControl::Subscribe { .. } | McpControl::Unsubscribe { .. } => {
+                                unreachable!("handled above")
+                            }
+                        };
+                        Ok(value)
+                    }
+                })
+                .await
+            }
+        }
     }
 }
 

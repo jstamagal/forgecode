@@ -38,17 +38,12 @@ Search for TODO comments
 
 ### 7. Assistant
 
-**Semantic Search:**
-- `Find authentication implementation`
-
-### 8. Assistant
-
 **Execute:** 
 ```
 cargo test
 ```
 
-### 9. User
+### 8. User
 
 ````
 Great! Everything looks good.

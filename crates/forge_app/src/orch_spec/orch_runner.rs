@@ -132,6 +132,7 @@ impl Runner {
         let orch = Orchestrator::new(services.clone(), conversation, agent, setup.config.clone())
             .error_tracker(ToolErrorTracker::new(3))
             .tool_definitions(system_tools)
+            .surface(setup.surface.clone().unwrap_or_default())
             .hook(Arc::new(
                 Hook::default()
                     .on_request(DoomLoopDetector::default())
@@ -180,10 +181,19 @@ impl AgentService for Runner {
     async fn call(
         &self,
         _: &forge_domain::Agent,
-        _: &forge_domain::ToolCallContext,
+        context: &forge_domain::ToolCallContext,
         test_call: forge_domain::ToolCallFull,
     ) -> forge_domain::ToolResult {
         let name = test_call.name.clone();
+        // A mocked `tool_discovery` load changes the surface state the way the
+        // real one does, so the next request publishes the tool.
+        if name.as_str() == forge_domain::TOOL_DISCOVERY
+            && let Ok(args) = test_call.arguments.parse()
+            && let Some(id) = args.get("load").and_then(|v| v.as_str())
+            && let Ok(state) = context.surface_state()
+        {
+            state.with(|s| s.loaded.insert(id.to_string()));
+        }
         let mut guard = self.test_tool_calls.lock().await;
         for (id, (call, result)) in guard.iter().enumerate() {
             if call.call_id == test_call.call_id {
@@ -261,6 +271,14 @@ impl ShellService for Runner {
                 description: None,
             })
         }
+    }
+
+    async fn shell_tool(
+        &self,
+        _input: forge_domain::Shell,
+        _cwd: std::path::PathBuf,
+    ) -> anyhow::Result<String> {
+        unimplemented!("the orchestrator spec mocks tool calls, not the shell tool")
     }
 }
 

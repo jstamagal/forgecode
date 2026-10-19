@@ -80,7 +80,21 @@ impl ToolOrder {
             return Self::default();
         }
 
-        Self::new(tools.to_vec())
+        // Order by the noun of each `tools:` entry: `name:lazy` orders like
+        // `name`; `tag:` entries and bans name no position.
+        let nouns = tools
+            .iter()
+            .filter(|entry| !entry.as_str().starts_with("tag:"))
+            .filter(|entry| !entry.as_str().ends_with(":ban"))
+            .map(|entry| {
+                let noun = match entry.as_str().rsplit_once(':') {
+                    Some((noun, "eager" | "lazy")) => noun,
+                    _ => entry.as_str(),
+                };
+                ToolName::new(crate::deprecated_alias(noun).unwrap_or(noun))
+            })
+            .collect();
+        Self::new(nouns)
     }
 
     /// Sorts tool definitions according to the ordering strategy
@@ -264,7 +278,7 @@ mod tests {
             ToolName::new("read"),
             ToolName::new("sage"),
             ToolName::new("patch"),
-            ToolName::new("sem_search"),
+            ToolName::new("fs_search"),
         ];
 
         let actual = ToolOrder::from_tool_list(&fixture);
@@ -275,7 +289,7 @@ mod tests {
         assert_eq!(names[1], "read");
         assert_eq!(names[2], "sage");
         assert_eq!(names[3], "patch");
-        assert_eq!(names[4], "sem_search");
+        assert_eq!(names[4], "fs_search");
     }
 
     #[test]

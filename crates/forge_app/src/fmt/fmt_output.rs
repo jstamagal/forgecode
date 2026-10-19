@@ -24,13 +24,6 @@ impl FormatContent for ToolOperation {
                     .diff()
                     .to_string(),
             )),
-            ToolOperation::FsMultiPatch { input: _, output } => {
-                Some(ChatResponseContent::ToolOutput(
-                    DiffFormat::format(&output.before, &output.after)
-                        .diff()
-                        .to_string(),
-                ))
-            }
             ToolOperation::PlanCreate { input: _, output } => Some({
                 let title = TitleFormat::debug(format!(
                     "Create {}",
@@ -46,13 +39,12 @@ impl FormatContent for ToolOperation {
             }
             ToolOperation::FsRead { input: _, output: _ }
             | ToolOperation::FsRemove { input: _, output: _ }
-            | ToolOperation::FsSearch { input: _, output: _ }
-            | ToolOperation::CodebaseSearch { output: _ }
             | ToolOperation::FsUndo { input: _, output: _ }
-            | ToolOperation::NetFetch { input: _, output: _ }
-            | ToolOperation::Shell { output: _ }
-            | ToolOperation::FollowUp { output: _ }
+            | ToolOperation::Output { output: _ }
             | ToolOperation::Skill { output: _ } => None,
+            // A shell job's result is shown to the user as it is given to the
+            // model (the command's output is not streamed live).
+            ToolOperation::Text { text } => Some(ChatResponseContent::ToolOutput(text.clone())),
         }
     }
 }
@@ -70,10 +62,7 @@ mod tests {
     use super::FormatContent;
     // ContentFormat is now ChatResponseContent
     use crate::operation::ToolOperation;
-    use crate::{
-        Content, FsRemoveOutput, FsUndoOutput, FsWriteOutput, HttpResponse, Match, MatchResult,
-        PatchOutput, ReadOutput, ResponseContext, SearchResult, ShellOutput,
-    };
+    use crate::{Content, FsRemoveOutput, FsUndoOutput, FsWriteOutput, PatchOutput, ReadOutput};
 
     // ContentFormat methods are now implemented in ChatResponseContent
 
@@ -110,7 +99,11 @@ mod tests {
         let fixture = ToolOperation::FsRead {
             input: forge_domain::FSRead {
                 file_path: "/home/user/test.txt".to_string(),
-                range: Some(forge_domain::FSReadRange { start_line: Some(2), end_line: Some(4) }),
+                range: Some(forge_domain::FSReadRange {
+                    start_line: Some(2),
+                    end_line: Some(4),
+                    ..Default::default()
+                }),
                 show_line_numbers: true,
             },
             output: ReadOutput {
@@ -140,6 +133,8 @@ mod tests {
                 before: None,
                 errors: vec![],
                 content_hash: crate::compute_hash(content),
+                bytes: 0,
+                notices: vec![],
             },
         };
         let env = fixture_environment();
@@ -164,16 +159,20 @@ mod tests {
                 before: Some("old content".to_string()),
                 errors: vec![],
                 content_hash: crate::compute_hash(content),
+                bytes: 0,
+                notices: vec![],
             },
         };
         let env = fixture_environment();
 
-        let actual = fixture.to_content(&env);
-        let expected = Some(ChatResponseContent::ToolOutput(
-            DiffFormat::format("old content", "new content")
-                .diff()
-                .to_string(),
-        ));
+        // Colour is process-global and other tests toggle it, so compare the
+        // diff text without ANSI codes.
+        let actual = match fixture.to_content(&env) {
+            Some(ChatResponseContent::ToolOutput(text)) => strip_ansi_codes(&text).to_string(),
+            other => panic!("expected tool output, got {other:?}"),
+        };
+        let expected =
+            strip_ansi_codes(DiffFormat::format("old content", "new content").diff()).to_string();
 
         assert_eq!(actual, expected);
     }
@@ -196,6 +195,8 @@ mod tests {
                     message: "Syntax error".to_string(),
                 }],
                 content_hash: crate::compute_hash(content),
+                bytes: 0,
+                notices: vec![],
             },
         };
         let env = fixture_environment();
@@ -209,84 +210,12 @@ mod tests {
     #[test]
     fn test_fs_remove() {
         let fixture = ToolOperation::FsRemove {
-            input: forge_domain::FSRemove { path: "/home/user/project/file.txt".to_string() },
-            output: FsRemoveOutput { content: "".to_string() },
-        };
-        let env = fixture_environment();
-
-        let actual = fixture.to_content(&env);
-        let expected = None;
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn test_fs_search_with_matches() {
-        let fixture = ToolOperation::FsSearch {
-            input: forge_domain::FSSearch {
-                path: Some("/home/user/project".to_string()),
-                pattern: "Hello".to_string(),
-                ..Default::default()
+            input: forge_domain::FSRemove::new("/home/user/project/file.txt".to_string()),
+            output: FsRemoveOutput {
+                content: "".to_string(),
+                mode: crate::RemoveMode::Deleted,
+                notices: vec![],
             },
-            output: Some(SearchResult {
-                matches: vec![
-                    Match {
-                        path: "file1.txt".to_string(),
-                        result: Some(MatchResult::Found {
-                            line_number: Some(1),
-                            line: "Hello world".to_string(),
-                        }),
-                    },
-                    Match {
-                        path: "file2.txt".to_string(),
-                        result: Some(MatchResult::Found {
-                            line_number: Some(3),
-                            line: "Hello universe".to_string(),
-                        }),
-                    },
-                ],
-            }),
-        };
-        let env = fixture_environment();
-
-        let actual = fixture.to_content(&env);
-        let expected = None;
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn test_fs_search_no_matches() {
-        let fixture = ToolOperation::FsSearch {
-            input: forge_domain::FSSearch {
-                path: Some("/home/user/project".to_string()),
-                pattern: "nonexistent".to_string(),
-                ..Default::default()
-            },
-            output: Some(SearchResult {
-                matches: vec![Match {
-                    path: "file1.txt".to_string(),
-                    result: Some(MatchResult::Error("Permission denied".to_string())),
-                }],
-            }),
-        };
-        let env = fixture_environment();
-
-        let actual = fixture.to_content(&env);
-        let expected = None;
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn test_fs_search_none() {
-        let fixture = ToolOperation::FsSearch {
-            input: forge_domain::FSSearch {
-                path: Some("/home/user/project".to_string()),
-                pattern: "search".to_string(),
-                ..Default::default()
-            },
-            output: None,
         };
         let env = fixture_environment();
 
@@ -300,17 +229,21 @@ mod tests {
     fn test_fs_patch_success() {
         let after_content = "Hello universe\nThis is a test\nNew line";
         let fixture = ToolOperation::FsPatch {
-            input: forge_domain::FSPatch {
-                file_path: "/home/user/project/test.txt".to_string(),
-                old_string: "Hello world".to_string(),
-                new_string: "Hello universe".to_string(),
-                replace_all: false,
-            },
+            input: forge_domain::FSPatch::new(
+                "/home/user/project/test.txt",
+                "Hello world",
+                "Hello universe",
+            ),
             output: PatchOutput {
                 errors: vec![],
                 before: "Hello world\nThis is a test".to_string(),
                 after: after_content.to_string(),
                 content_hash: crate::compute_hash(after_content),
+                edits: 1,
+                replacements: 1,
+                fuzzy_edits: 0,
+                batch: false,
+                notices: vec![],
             },
         };
         let env = fixture_environment();
@@ -323,12 +256,11 @@ mod tests {
     fn test_fs_patch_with_warning() {
         let after_content = "line1\nnew line\nline2";
         let fixture = ToolOperation::FsPatch {
-            input: forge_domain::FSPatch {
-                file_path: "/home/user/project/large_file.txt".to_string(),
-                old_string: "line2".to_string(),
-                new_string: "new line\nline2".to_string(),
-                replace_all: false,
-            },
+            input: forge_domain::FSPatch::new(
+                "/home/user/project/large_file.txt",
+                "line2",
+                "new line\nline2",
+            ),
             output: PatchOutput {
                 errors: vec![forge_domain::SyntaxError {
                     line: 10,
@@ -338,6 +270,11 @@ mod tests {
                 before: "line1\nline2".to_string(),
                 after: after_content.to_string(),
                 content_hash: crate::compute_hash(after_content),
+                edits: 1,
+                replacements: 1,
+                fuzzy_edits: 0,
+                batch: false,
+                notices: vec![],
             },
         };
         let env = fixture_environment();
@@ -358,142 +295,9 @@ mod tests {
             output: FsUndoOutput {
                 before_undo: Some("ABC".to_string()),
                 after_undo: Some("PQR".to_string()),
+                kind: crate::UndoKind::File,
             },
         };
-        let env = fixture_environment();
-
-        let actual = fixture.to_content(&env);
-        let expected = None;
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn test_net_fetch_success() {
-        let fixture = ToolOperation::NetFetch {
-            input: forge_domain::NetFetch {
-                url: "https://example.com".to_string(),
-                raw: Some(false),
-            },
-            output: HttpResponse {
-                content: "# Example Website\n\nThis is content.".to_string(),
-                code: 200,
-                context: ResponseContext::Parsed,
-                content_type: "text/html".to_string(),
-            },
-        };
-        let env = fixture_environment();
-
-        let actual = fixture.to_content(&env);
-        let expected = None;
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn test_net_fetch_error() {
-        let fixture = ToolOperation::NetFetch {
-            input: forge_domain::NetFetch {
-                url: "https://example.com/notfound".to_string(),
-                raw: Some(true),
-            },
-            output: HttpResponse {
-                content: "Not Found".to_string(),
-                code: 404,
-                context: ResponseContext::Raw,
-                content_type: "text/plain".to_string(),
-            },
-        };
-        let env = fixture_environment();
-
-        let actual = fixture.to_content(&env);
-        let expected = None;
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn test_shell_success() {
-        let fixture = ToolOperation::Shell {
-            output: ShellOutput {
-                output: forge_domain::CommandOutput {
-                    command: "ls -la".to_string(),
-                    stdout: "file1.txt\nfile2.txt".to_string(),
-                    stderr: "".to_string(),
-                    exit_code: Some(0),
-                },
-                shell: "/bin/bash".to_string(),
-                description: None,
-            },
-        };
-        let env = fixture_environment();
-
-        let actual = fixture.to_content(&env);
-        let expected = None;
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn test_shell_success_with_stderr() {
-        let fixture = ToolOperation::Shell {
-            output: ShellOutput {
-                output: forge_domain::CommandOutput {
-                    command: "command_with_warnings".to_string(),
-                    stdout: "output line".to_string(),
-                    stderr: "warning line".to_string(),
-                    exit_code: Some(0),
-                },
-                shell: "/bin/bash".to_string(),
-                description: None,
-            },
-        };
-        let env = fixture_environment();
-
-        let actual = fixture.to_content(&env);
-        let expected = None;
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn test_shell_failure() {
-        let fixture = ToolOperation::Shell {
-            output: ShellOutput {
-                output: forge_domain::CommandOutput {
-                    command: "failing_command".to_string(),
-                    stdout: "".to_string(),
-                    stderr: "Error: command not found".to_string(),
-                    exit_code: Some(127),
-                },
-                shell: "/bin/bash".to_string(),
-                description: None,
-            },
-        };
-        let env = fixture_environment();
-
-        let actual = fixture.to_content(&env);
-        let expected = None;
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn test_follow_up_with_response() {
-        let fixture = ToolOperation::FollowUp {
-            output: Some("Yes, continue with the operation".to_string()),
-        };
-        let env = fixture_environment();
-
-        let actual = fixture.to_content(&env);
-        let expected = None;
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn test_follow_up_no_response() {
-        let fixture = ToolOperation::FollowUp { output: None };
         let env = fixture_environment();
 
         let actual = fixture.to_content(&env);
@@ -511,6 +315,7 @@ mod tests {
                 content:
                     "# Test Plan\n\n## Task 1\n- Do something\n\n## Task 2\n- Do something else"
                         .to_string(),
+                overwrite: false,
             },
             output: crate::PlanCreateOutput {
                 path: PathBuf::from("plans/2024-08-11-test-plan-v1.md"),

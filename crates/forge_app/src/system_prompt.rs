@@ -25,6 +25,8 @@ pub struct SystemPrompt<S> {
     max_extensions: usize,
     /// Configuration values passed into tool description templates.
     template_config: TemplateConfig,
+    /// Model-facing tool names (X23).
+    aliases: forge_domain::AliasMap,
 }
 
 impl<S: SkillFetchService + ShellService> SystemPrompt<S> {
@@ -39,6 +41,7 @@ impl<S: SkillFetchService + ShellService> SystemPrompt<S> {
             custom_instructions: Vec::default(),
             max_extensions: 0,
             template_config: TemplateConfig::default(),
+            aliases: forge_domain::AliasMap::default(),
         }
     }
 
@@ -92,7 +95,15 @@ impl<S: SkillFetchService + ShellService> SystemPrompt<S> {
                 custom_rules.push(rule.as_str());
             });
 
-            let skills = self.services.list_skills().await?;
+            // T21: user-only skills (`disable-model-invocation`) are not
+            // offered to the model.
+            let skills: Vec<_> = self
+                .services
+                .list_skills()
+                .await?
+                .into_iter()
+                .filter(|skill| !skill.disable_model_invocation)
+                .collect();
 
             // Fetch extension statistics from git
             let extensions = self.fetch_extensions(self.max_extensions).await;
@@ -107,11 +118,16 @@ impl<S: SkillFetchService + ShellService> SystemPrompt<S> {
                 .map(|def| def.name.to_string())
                 .collect();
             let tool_names: Map<String, Value> = ToolCatalog::iter()
-                .map(|tool| {
-                    let def = tool.definition();
-                    (def.name.to_string(), json!(def.name.to_string()))
+                .map(|tool| tool.definition().name.to_string())
+                .filter(|name| agent_tool_names.contains(name))
+                .map(|name| {
+                    let shown = self
+                        .aliases
+                        .get(&name)
+                        .cloned()
+                        .unwrap_or_else(|| name.clone());
+                    (name, json!(shown))
                 })
-                .filter(|(name, _)| agent_tool_names.contains(name))
                 .collect();
 
             let ctx = SystemContext {

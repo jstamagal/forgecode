@@ -136,6 +136,7 @@ mod tests {
                     ToolValue::Empty,
                 ],
                 is_error: false,
+                uncounted: false,
             },
         }])
     }
@@ -205,7 +206,11 @@ mod tests {
         let fixture = Context::default().add_tool_results(vec![ToolResult {
             name: ToolName::new("empty_tool"),
             call_id: Some(ToolCallId::new("call_empty")),
-            output: ToolOutput { values: vec![ToolValue::Empty], is_error: false },
+            output: ToolOutput {
+                values: vec![ToolValue::Empty],
+                is_error: false,
+                uncounted: false,
+            },
         }]);
 
         let mut transformer = TransformToolCalls::new();

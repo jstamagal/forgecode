@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 chrono.workspace = true
+libc = "0.2"
 tokio.workspace = true
 tracing.workspace = true
 async-stream.workspace = true
@@ -54,11 +55,20 @@ http.workspace = true
 infer.workspace = true
 uuid.workspace = true
 tonic.workspace = true
+ast-grep-core.workspace = true
+ast-grep-language.workspace = true
+similar.workspace = true
+portable-pty.workspace = true
+vt100.workspace = true
+image.workspace = true
+ab_glyph.workspace = true
+tempfile.workspace = true
+sha2.workspace = true
+hex.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "time", "test-util"] }
 pretty_assertions.workspace = true
-tempfile.workspace = true
 fake = { version = "5.1.0", features = ["derive"] }
 forge_test_kit.workspace = true
 

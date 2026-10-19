@@ -10,7 +10,7 @@ expression: actual.tools
       "additionalProperties": false,
       "properties": {
         "file_path": {
-          "description": "Absolute path to the file to read.",
+          "description": "Path of the file to read.",
           "type": "string"
         },
         "range": {
@@ -18,6 +18,18 @@ expression: actual.tools
             {
               "additionalProperties": false,
               "properties": {
+                "end_byte": {
+                  "anyOf": [
+                    {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "0-based offset one past the last byte to read (byte range)."
+                },
                 "end_line": {
                   "anyOf": [
                     {
@@ -28,6 +40,18 @@ expression: actual.tools
                     }
                   ],
                   "description": "Inclusive 1-based last line."
+                },
+                "start_byte": {
+                  "anyOf": [
+                    {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "0-based byte offset of the first byte to read (byte range)."
                 },
                 "start_line": {
                   "anyOf": [
@@ -42,7 +66,9 @@ expression: actual.tools
                 }
               },
               "required": [
+                "end_byte",
                 "end_line",
+                "start_byte",
                 "start_line"
               ],
               "type": "object"
@@ -51,11 +77,11 @@ expression: actual.tools
               "type": "null"
             }
           ],
-          "description": "Optional line range for partial reads."
+          "description": "Optional line range (`start_line`/`end_line`) or byte range\n(`start_byte`/`end_byte`) for partial reads."
         },
         "show_line_numbers": {
           "default": true,
-          "description": "If true, prefixes each line with its line index (starting at 1).\nDefaults to true.",
+          "description": "If true, prefixes each line with its line number. Defaults to true.",
           "type": "boolean"
         }
       },
@@ -67,7 +93,7 @@ expression: actual.tools
       "type": "object"
     },
     "strict": true,
-    "description": "Reads a file from the local filesystem. You can access any file directly by using this tool. Assume this tool is able to read all files on the machine. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.\n\nUsage:\n- The file_path parameter must be an absolute path, not a relative path\n- By default, it reads up to {{config.maxReadSize}} lines starting from the beginning of the file\n- You can optionally specify a line start_line and end_line (especially handy for long files), but it's recommended to read the whole file by not providing these parameters\n- Any lines longer than {{config.maxLineLength}} characters will be truncated\n- Results are returned using rg \"\" -n format, with line numbers starting at 1\n{{#if (contains model.input_modalities \"image\")}}\n- This tool allows Forge Code to read images (eg PNG, JPG, etc). When reading an image file the contents are presented visually.\n- PDFs, Automatically encoded as base64 and sent as visual content for LLM to analyze pages. Any PDFs larger than {{config.maxImageSize}} bytes will return error\n{{/if}}\n- Jupyter notebooks (.ipynb files) are read as plain JSON text - you can parse the cell structure, outputs, and embedded content directly from the JSON\n- This tool can only read files, not directories. To read a directory, use an ls command via the `{{tool_names.shell}}` tool.\n- You can call multiple tools in a single response. It is always better to speculatively read multiple potentially useful files in parallel."
+    "description": "Read one file: text, PDF, image, or notebook. Relative paths resolve against the working directory.\n- Text comes back as `12:content`: line number, a colon, then the text. Lines are returned whole, however long they are. The prefix is not file content; strip it when you quote text back into an edit. `show_line_numbers: false` returns the text without prefixes.\n- A read stops after {{config.maxReadSize}} lines and ends with a footer naming the exact `range` that continues it. Use `range` with `start_line`/`end_line` for a slice of the file.\n- A whole-file read (no `range`) of a file larger than {{config.maxReadBytes}} bytes is refused with a suggested ranged call; ranged reads are not subject to that cap.\n- `range` also takes a byte range, `start_byte` (0-based) and optional `end_byte` (one past the last byte), for text with few or no line breaks: it returns raw text without line prefixes, one page at a time, snapped to UTF-8 character boundaries, and names the offset to continue from. Use it to page through a saved result file.\n- Pass either a line range or a byte range, never both.\n- Reading the same lines of an unchanged file again, while the earlier result is still in the conversation, returns a short note naming the read call that showed them.\n- A Jupyter notebook (.ipynb) read without a range comes back as its cells, each with its id, type, source and a summary of its outputs; a line or byte range reads its raw JSON.\n- A PDF comes back as extracted text (via `pdftotext`).\n{{#if (contains model.input_modalities \"image\")}}\n- Images (PNG, JPEG, GIF, WebP) come back as images; a PDF with no extractable text comes back as an image. Images and image-fallback PDFs larger than {{config.maxImageSize}} bytes are refused.\n{{/if}}\n- Directories, pipes and other special files are refused{{#if tool_names.fs_search}}; use `{{tool_names.fs_search}}` to find files{{/if}}.\n- Reading records which lines you have seen.{{#if tool_names.write}} An overwriting `{{tool_names.write}}` requires a prior read of the file.{{/if}}{{#if tool_names.patch}} `{{tool_names.patch}}` requires a prior read and that every line it changes was shown.{{/if}}\n- You can call multiple tools in a single response; read several files in parallel when you need them."
   },
   {
     "type": "function",
@@ -76,15 +102,15 @@ expression: actual.tools
       "additionalProperties": false,
       "properties": {
         "content": {
-          "description": "The content to write to the file",
+          "description": "The complete file content to write.",
           "type": "string"
         },
         "file_path": {
-          "description": "The absolute path to the file to write (must be absolute, not relative)",
+          "description": "Path of the file to create or replace.",
           "type": "string"
         },
         "overwrite": {
-          "description": "If set to true, existing files will be overwritten. If not set and the\nfile exists, an error will be returned with the content of the\nexisting file.",
+          "description": "Required to replace an existing file; the file must have been read\nfirst and must not have changed since.",
           "type": "boolean"
         }
       },
@@ -96,7 +122,7 @@ expression: actual.tools
       "type": "object"
     },
     "strict": true,
-    "description": "Writes a file to the local filesystem.\n\nUsage:\n- This tool will overwrite the existing file if there is one at the provided path.\n- If this is an existing file, you MUST use the {{tool_names.read}} tool first to read the file's contents and use this tool with 'overwrite' as true . This tool will fail if you did not read the file first or don't set overwrite parameter to true.\n- ALWAYS prefer {{tool_names.patch}} on existing files in the codebase. NEVER write new files unless explicitly required.\n- NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.\n- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked."
+    "description": "Create a file, or replace one whole. Missing parent directories are created.\n- Replacing an existing file needs `overwrite=true` and a prior read of the file in this conversation{{#if tool_names.read}} (`{{tool_names.read}}`){{/if}}; one page is enough, the whole file is not needed. Without `overwrite=true` an existing file is refused.\n- If the file changed on disk since that read, the overwrite is refused and nothing is written; the error names both hashes and shows the diff from what you read to what is there now, and a retry after it goes through.\n- The file keeps its existing line-ending style (LF, CRLF or CR); a new file gets LF.\n- The previous state is snapshotted first{{#if tool_names.undo}}, so `{{tool_names.undo}}` brings it back (undoing a create deletes the file){{/if}}.\n- After the write the file is parsed locally and syntax errors the write introduced are reported as a warning.\n{{#if tool_names.patch}}\n- Edit existing files with `{{tool_names.patch}}`; use this only for new files or a deliberate full rewrite.\n{{/if}}\n- Do not create documentation files unless asked."
   },
   {
     "type": "function",
@@ -104,43 +130,7 @@ expression: actual.tools
     "parameters": {
       "additionalProperties": false,
       "properties": {
-        "-A": {
-          "anyOf": [
-            {
-              "minimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Number of lines to show after each match (rg -A). Requires output_mode:\n\"content\", ignored otherwise."
-        },
-        "-B": {
-          "anyOf": [
-            {
-              "minimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Number of lines to show before each match (rg -B). Requires output_mode:\n\"content\", ignored otherwise."
-        },
-        "-C": {
-          "anyOf": [
-            {
-              "minimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Number of lines to show before and after each match (rg -C). Requires\noutput_mode: \"content\", ignored otherwise."
-        },
-        "-i": {
+        "case_insensitive": {
           "anyOf": [
             {
               "type": "boolean"
@@ -149,18 +139,54 @@ expression: actual.tools
               "type": "null"
             }
           ],
-          "description": "Case insensitive search (rg -i)"
+          "description": "Match without case sensitivity."
         },
-        "-n": {
+        "context": {
           "anyOf": [
             {
-              "type": "boolean"
+              "minimum": 0,
+              "type": "integer"
             },
             {
               "type": "null"
             }
           ],
-          "description": "Show line numbers in output (rg -n). Requires output_mode: \"content\",\nignored otherwise."
+          "description": "Lines of context before and after each match (content mode)."
+        },
+        "context_after": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Lines of context after each match (content mode)."
+        },
+        "context_before": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Lines of context before each match (content mode)."
+        },
+        "file_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "File type, e.g. rust, py, js (ripgrep type names)."
         },
         "glob": {
           "anyOf": [
@@ -171,19 +197,30 @@ expression: actual.tools
               "type": "null"
             }
           ],
-          "description": "Glob pattern to filter files (e.g. \"*.js\", \"*.{ts,tsx}\") - maps to rg\n--glob"
+          "description": "Glob filter on paths (e.g. \"*.rs\", \"*.{ts,tsx}\", \"!*.min.js\")."
         },
         "head_limit": {
           "anyOf": [
             {
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             {
               "type": "null"
             }
           ],
-          "description": "Limit output to first N lines/entries, equivalent to \"| head -N\". Works\nacross all output modes: content (limits output lines),\nfiles_with_matches (limits file paths), count (limits count entries).\nWhen unspecified, shows all results from ripgrep."
+          "description": "Maximum result entries after `offset`."
+        },
+        "line_numbers": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Prefix content lines with their line numbers (default true)."
         },
         "multiline": {
           "anyOf": [
@@ -194,7 +231,7 @@ expression: actual.tools
               "type": "null"
             }
           ],
-          "description": "Enable multiline mode where . matches newlines and patterns can span\nlines (rg -U --multiline-dotall). Default: false."
+          "description": "Let the regex span lines (`.` matches newlines)."
         },
         "offset": {
           "anyOf": [
@@ -206,7 +243,7 @@ expression: actual.tools
               "type": "null"
             }
           ],
-          "description": "Skip first N lines/entries before applying head_limit"
+          "description": "Result entries to skip before `head_limit`."
         },
         "output_mode": {
           "anyOf": [
@@ -222,7 +259,7 @@ expression: actual.tools
               "type": "null"
             }
           ],
-          "description": "Output mode: \"content\" shows matching lines (supports -A/-B/-C context,\n-n line numbers, head_limit), \"files_with_matches\" shows file paths\n(supports head_limit), \"count\" shows match counts (supports head_limit).\nDefaults to \"files_with_matches\"."
+          "description": "\"content\" (matching lines), \"files_with_matches\" (paths, default) or\n\"count\" (matches per file)."
         },
         "path": {
           "anyOf": [
@@ -233,13 +270,45 @@ expression: actual.tools
               "type": "null"
             }
           ],
-          "description": "File or directory to search in (rg PATH). Defaults to current working\ndirectory."
+          "description": "File or directory to search (default: the current directory)."
         },
         "pattern": {
-          "description": "The regular expression pattern to search for in file contents.",
+          "description": "Regex to search file contents for.",
           "type": "string"
+        }
+      },
+      "required": [
+        "case_insensitive",
+        "context",
+        "context_after",
+        "context_before",
+        "file_type",
+        "glob",
+        "head_limit",
+        "line_numbers",
+        "multiline",
+        "offset",
+        "output_mode",
+        "path",
+        "pattern"
+      ],
+      "type": "object"
+    },
+    "strict": true,
+    "description": "Search file contents by regex. `output_mode` is `files_with_matches` (paths, the default), `content` (matching lines as `path:line:text`, context lines as `path-line-text`, `--` between groups) or `count` (`path:N`).\n- The search uses ripgrep's libraries in-process. Paths ignored by `.gitignore`/`.ignore` are skipped, as are hidden paths unless `path` names one or `glob` names a dot-leading component such as `.github/**`; binary files are skipped.\n- `glob` filters paths (a leading `!` excludes); `file_type` takes ripgrep type names (`rust`, `py`, `js`, …) or a bare extension, and cannot be combined with a positive `glob`.\n- Regex syntax is ripgrep's: escape literal braces (`interface\\{\\}`); `multiline: true` lets a pattern span lines.\n- Results are absolute paths in path order. Bytes that are not valid UTF-8 are shown as `\\xNN`.\n- The walk stays on the filesystem `path` is on and does not enter mount points below it; name a mounted share as `path` to search it. A search is bounded at 120 seconds.\n- `head_limit` and `offset` page through a large result; the result names the next `offset` when there are more. A result too large to show inline is written to a file whose path the result names.\n{{#if tool_names.read}}\n- Use `{{tool_names.read}}` to see a file once a search has found it.\n{{/if}}\n{{#if tool_names.task}}\n- Use `{{tool_names.task}}` for open-ended investigations that need several rounds of search and reading.\n{{/if}}"
+  },
+  {
+    "type": "function",
+    "name": "ast_search",
+    "parameters": {
+      "additionalProperties": false,
+      "description": "Input for the `ast_search` tool: structural search and rewrite.",
+      "properties": {
+        "apply": {
+          "description": "Write the rewrite (default false).",
+          "type": "boolean"
         },
-        "type": {
+        "language": {
           "anyOf": [
             {
               "type": "string"
@@ -248,66 +317,59 @@ expression: actual.tools
               "type": "null"
             }
           ],
-          "description": "File type to search (rg --type). Common types: js, py, rust, go, java,\netc. More efficient than include for standard file types."
+          "description": "Language (e.g. rust, python, typescript, tsx, go, c, cpp); inferred\nfrom each file's extension when omitted."
+        },
+        "max_results": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Most matches reported (default 200); an apply with more matches is\nrefused."
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "File or directory to search (default: the current directory)."
+        },
+        "pattern": {
+          "description": "ast-grep pattern; `$NAME` matches one node, `$$$NAME` zero or more.",
+          "type": "string"
+        },
+        "rewrite": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Replacement template using the pattern's metavariables; without\n`apply` the result is a diff and nothing is written."
         }
       },
       "required": [
-        "-A",
-        "-B",
-        "-C",
-        "-i",
-        "-n",
-        "glob",
-        "head_limit",
-        "multiline",
-        "offset",
-        "output_mode",
+        "apply",
+        "language",
+        "max_results",
         "path",
         "pattern",
-        "type"
+        "rewrite"
       ],
       "type": "object"
     },
     "strict": true,
-    "description": "A powerful search tool built on ripgrep\n\nUsage:\n- ALWAYS use `{{tool_names.fs_search}}` for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The `{{tool_names.fs_search}}` tool has been optimized for correct permissions and access.\n- Supports full regex syntax (e.g., \"log.*Error\", \"function\\\\s+\\\\w+\")\n- Filter files with glob parameter (e.g., \"*.js\", \"**/*.tsx\") or type parameter (e.g., \"js\", \"py\", \"rust\")\n- Output modes: \"content\" shows matching lines, \"files_with_matches\" shows only file paths (default), \"count\" shows match counts\n- Use Task tool for open-ended searches requiring multiple rounds\n- Pattern syntax: Uses ripgrep (not grep) - literal braces need escaping (use `interface\\\\{\\\\}` to find `interface{}` in Go code)\n- Multiline matching: By default patterns match within single lines only. For cross-line patterns like `struct \\\\{[\\\\s\\\\S]*?field`, use `multiline: true`"
-  },
-  {
-    "type": "function",
-    "name": "sem_search",
-    "parameters": {
-      "additionalProperties": false,
-      "properties": {
-        "queries": {
-          "description": "List of search queries to execute in parallel. Using multiple queries\n(2-3) with varied phrasings significantly improves results - each query\ncaptures different aspects of what you're looking for. Each query pairs\na search term with a use_case for reranking. Example: for\nauthentication, try \"user login verification\", \"token generation\",\n\"OAuth flow\".",
-          "items": {
-            "additionalProperties": false,
-            "description": "A paired query and use_case for semantic search. Each query must have a\ncorresponding use_case for document reranking.",
-            "properties": {
-              "query": {
-                "description": "The semantic embedding query that describes WHAT the code does or its\npurpose. This query is converted to a vector embedding and used to find\nsemantically similar code chunks in the vector database.\n\n**Guidelines for effective embedding queries:**\n- Use specific, targeted technical terms and domain concepts\n- Describe behavior, functionality, patterns, or implementation approach\n- Include concrete keywords like technology names, algorithms, data\n  structures\n- Balance specificity (focused results) with generality (avoid missing\n  relevant code)\n- Keep queries focused - overly broad queries cause timeouts and poor\n  results\n- **Align keywords with intent**: For documentation, use \"README\",\n  \"guide\", \"setup\"; for implementation, use \"function\", \"logic\",\n  \"handler\"\n\n**Good examples:**\n- \"exponential backoff retry mechanism with configurable delays\"\n- \"streaming LLM responses with SSE chunked transfer encoding\"\n- \"OAuth2 token refresh with automatic retry and expiry check\"\n- \"Diesel database migration runner with transaction support\"\n- \"semantic search reranker using cross-encoder model\"\n- \"README documentation configuration setup semantic search\"\n- \"markdown guide API documentation tool definitions\"\n\n**Bad examples:**\n- \"retry\" (too generic, will match everything)\n- \"authentication\" (overly broad - specify what aspect: login, tokens,\n  middleware?)\n- \"tool definitions schemas\" (too vague - be more specific about\n  structure or location)\n- \"how system works\" (meta-question, not searchable concept)\n- \"function that validates\" (focus on what it validates, not that it's a\n  function)",
-                "type": "string"
-              },
-              "use_case": {
-                "description": "The reranking query that describes your INTENT and WHY you need this\ncode. This query is used by the reranker model to filter and\nprioritize the most relevant results from the initial embedding\nsearch based on your specific use case.\n\n**Purpose:** While `query` casts a wide net for similar code, `use_case`\nnarrows it down by intent: implementation vs docs vs tests, reading\nvs modifying code, understanding architecture vs finding bugs, etc.\n\n**Guidelines for effective reranking queries:**\n- **MANDATORY FOR CODE**: ALWAYS include codebase construct keywords\n  (struct, trait, impl, interface, class, function, fn, definition,\n  implementation, declaration, type) when searching for code\n- **WHY CRITICAL**: The reranker gives HIGH WEIGHTAGE to these keywords\n  - \"struct\" → prioritizes struct definitions\n  - \"trait impl\" → prioritizes trait implementations\n  - \"function\" / \"fn\" → prioritizes function definitions\n  - Without these, you get documentation instead of code!\n- Clearly state your goal: understand, modify, debug, find examples,\n  etc.\n- Specify the TYPE of code you need: implementation, tests, docs,\n  config, architecture\n- Include WHY context: \"to fix a bug\", \"to add a feature\", \"to\n  understand flow\"\n- Be explicit about what to AVOID: \"not tests\", \"not documentation\",\n  \"not examples\"\n- **Match intent to file types**: documentation intent → avoid\n  requesting \"implementation code\"; implementation intent → avoid\n  requesting \"documentation\"\n- Keep it concise (1-2 sentences) but informative\n- MUST be different from the embedding query - add intent/context\n\n**Good examples (ALWAYS include construct keywords):**\n- \"I need the struct definition and trait implementation for Diesel\n  migrations to understand the transaction handling, not setup docs\"\n- \"Show me the function implementation for semantic search reranker so I\n  can modify it to support file type filtering\"\n- \"Find the type declarations and interface definitions for the tool\n  registry, not the usage examples\"\n- \"I'm debugging a timeout issue and need the function implementation\n  that handles streaming responses, not the API documentation\"\n- \"Show me the struct definitions and trait implementations for\n  authentication, not the setup guide\"\n- \"I need the impl block for workspace sync to understand how it detects\n  file changes\"\n- \"Find the fn definitions for embedding generation batching logic\"\n- \"I need documentation explaining how to configure semantic search, not\n  the implementation code\"\n- \"Find the README or setup guide that explains the tool registration\n  process, avoiding implementation details\"\n\n**Bad examples (missing construct keywords = FAILS):**\n- \"I need code that handles authentication\" ❌ MISSING:\n  struct/trait/impl/function\n- \"Show me the database logic\" ❌ MISSING: trait/impl/function keywords\n- \"I need the workspace sync implementation\" ❌ MISSING: struct/impl/fn\n  - too generic\n- \"Find the reranker code\" ❌ MISSING: struct/trait/impl/function\n- \"exponential backoff retry mechanism\" ❌ MISSING: WHY + construct\n  keywords\n- \"find authentication code\" ❌ MISSING: which construct? struct? trait?\n  impl?\n- \"tool definitions\" ❌ MISSING: struct? trait? type? be specific\n- \"how it works\" (too vague - specify what you want to understand)\n- Long rambling explanation without clear intent (keep it focused)",
-                "type": "string"
-              }
-            },
-            "required": [
-              "query",
-              "use_case"
-            ],
-            "type": "object"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "queries"
-      ],
-      "type": "object"
-    },
-    "strict": true,
-    "description": "AI-powered semantic code search. YOUR DEFAULT TOOL for code discovery and exploration when searching within {{env.cwd}}. Use this when you need to find code locations, understand implementations, discover patterns, or explore unfamiliar code - it works with natural language about behavior and concepts, not just keyword matching.\n\n**WHEN TO USE sem_search:**\n- Finding implementation of specific features or algorithms\n- Understanding how a system works across multiple files\n- Discovering architectural patterns and design approaches\n- Locating test examples or fixtures\n- Finding where specific technologies/libraries are used\n- Exploring unfamiliar codebases to learn structure\n- Finding documentation files (README, guides, API docs)\n\n**WHEN NOT TO USE (use {{tool_names.fs_search}} instead):**\n- Searching for exact strings, TODOs, or specific function names\n- Finding all occurrences of a variable or identifier\n- Searching in specific file paths or with regex patterns\n- When you know the exact text to search for\n\nIMPORTANT: Only searches within {{env.cwd}} and subdirectories. For paths outside this scope, use {{tool_names.fs_search}} with path parameter.\n\n**TIPS FOR SUCCESS:**\n- Use 2-3 varied queries to capture different aspects (e.g., \"OAuth token refresh\", \"JWT expiry handling\", \"authentication middleware\")\n- Balance specificity (focused results) with generality (don't miss relevant code)\n- Avoid overly broad queries like \"authentication\" or \"tools\" - be specific about what aspect you need\n- Keep queries targeted - too many broad queries can cause timeouts\n- **Match your intent**: If seeking documentation, use doc-focused keywords (\"setup guide\", \"configuration README\"); if seeking code, use implementation terms (\"token refresh logic\", \"error handling implementation\")\n\nReturns the topK most relevant file:line locations with code context. Each query is ranked independently, then reranked by relevance to your stated intent."
+    "description": "Search code structurally with ast-grep (in-process, tree-sitter grammars). Patterns match parsed syntax, so they span whitespace and line breaks and never match inside comments or strings.{{#if tool_names.fs_search}} Use `{{tool_names.fs_search}}` for plain text, regex and filenames.{{/if}}\n- In a pattern `$NAME` matches one syntax node and `$$$NAME` matches zero or more; metavariables are uppercase, and reusing one requires equal captures.\n- The language is inferred from each file's extension; set `language` to restrict the search to one language. Under `language=\"c\"` a bare call pattern like `call($A)` matches nothing, because tree-sitter-c parses that fragment as a type; write it as an expression statement (`call($A);`).\n- Matches come back as an absolute `path:line` heading, the numbered source lines (`12|code`), and the metavariable captures. When more matches exist than `max_results` (default 200), the extra ones are dropped and the result says so.\n- The walk skips paths ignored by `.gitignore` and hidden paths.\n- Rewrites are two-step: `rewrite` alone is a dry run that shows a unified diff and changes nothing; `apply=true` writes it and is refused when there are more matches than `max_results`. An applied rewrite snapshots every changed file first{{#if tool_names.undo}}, so `{{tool_names.undo}}` brings each back{{/if}}."
   },
   {
     "type": "function",
@@ -316,43 +378,99 @@ expression: actual.tools
       "additionalProperties": false,
       "properties": {
         "path": {
-          "description": "The path of the file to remove (absolute path required)",
+          "description": "Path of the file, directory or symlink to remove.",
           "type": "string"
+        },
+        "permanent": {
+          "description": "Delete directly instead of moving to the trash (default false).",
+          "type": "boolean"
         }
       },
       "required": [
-        "path"
+        "path",
+        "permanent"
       ],
       "type": "object"
     },
     "strict": true,
-    "description": "Request to remove a file at the specified path. Use when you need to delete an existing file. The path must be absolute. This operation can be undone using the `{{tool_names.undo}}` tool."
+    "description": "Move a file, directory or symlink to the trash, or delete it with `permanent=true`. Either way the path is snapshotted first{{#if tool_names.undo}}, so `{{tool_names.undo}}` can bring it back{{/if}}. Symlinks are removed as symlinks, never followed. The trash uses `trash` or `trash-put`; when neither is installed or the command fails, nothing is removed and `permanent=true` is the way to remove the path. Anything over 512 MiB is refused rather than trashed; confirm with the user before deleting that with `permanent=true`."
   },
   {
     "type": "function",
     "name": "patch",
     "parameters": {
       "additionalProperties": false,
+      "description": "Input for the `patch` tool: either the scalar form (`old_string`,\n`new_string`, `replace_all`) or the batch form (`edits`), never both.",
       "properties": {
+        "edits": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": false,
+                "description": "A single replacement inside a batch `patch` call.",
+                "properties": {
+                  "new_string": {
+                    "description": "Replacement text; must differ from old_string.",
+                    "type": "string"
+                  },
+                  "old_string": {
+                    "description": "Exact text to replace.",
+                    "type": "string"
+                  },
+                  "replace_all": {
+                    "default": false,
+                    "description": "Replace every occurrence of old_string instead of requiring exactly\none (default false).",
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "new_string",
+                  "old_string",
+                  "replace_all"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Several replacements applied in order, each seeing the previous\nresult. Never combined with the scalar form."
+        },
         "file_path": {
-          "description": "The absolute path to the file to modify",
+          "description": "Path of the file to modify.",
           "type": "string"
         },
         "new_string": {
-          "description": "The text to replace it with (must be different from old_string)",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Replacement text; must differ from old_string (scalar form)."
         },
         "old_string": {
-          "description": "The text to replace",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Exact text to replace (scalar form)."
         },
         "replace_all": {
-          "default": false,
-          "description": "Replace all occurrences of old_string (default false)",
+          "description": "Replace every occurrence of old_string instead of requiring exactly\none (scalar form, default false).",
           "type": "boolean"
         }
       },
       "required": [
+        "edits",
         "file_path",
         "new_string",
         "old_string",
@@ -361,56 +479,7 @@ expression: actual.tools
       "type": "object"
     },
     "strict": true,
-    "description": "Performs exact string replacements in files.\nUsage:\n- You must use your `{{tool_names.read}}` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file. \n- When editing text from `{{tool_names.read}}` tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: 'line_number:'. Everything after that line_number: is the actual file content to match. Never include any part of the line number prefix in the old_string or new_string.\n- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.\n- Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.\n- The edit will FAIL if `old_string` is not unique in the file. Either provide a larger string with more surrounding context to make it unique or use `replace_all` to change every instance of `old_string`. \n- Use `replace_all` for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance."
-  },
-  {
-    "type": "function",
-    "name": "multi_patch",
-    "parameters": {
-      "additionalProperties": false,
-      "properties": {
-        "edits": {
-          "description": "Array of edit operations to perform sequentially on the file",
-          "items": {
-            "additionalProperties": false,
-            "description": "A single edit operation in a multi-patch",
-            "properties": {
-              "new_string": {
-                "description": "The text to replace it with (must be different from old_string)",
-                "type": "string"
-              },
-              "old_string": {
-                "description": "The text to replace",
-                "type": "string"
-              },
-              "replace_all": {
-                "default": false,
-                "description": "Replace all occurrences of old_string (default false)",
-                "type": "boolean"
-              }
-            },
-            "required": [
-              "new_string",
-              "old_string",
-              "replace_all"
-            ],
-            "type": "object"
-          },
-          "type": "array"
-        },
-        "file_path": {
-          "description": "The absolute path to the file to modify",
-          "type": "string"
-        }
-      },
-      "required": [
-        "edits",
-        "file_path"
-      ],
-      "type": "object"
-    },
-    "strict": true,
-    "description": "This is a tool for making multiple edits to a single file in one operation. It is built on top of the {{tool_names.patch}} tool and allows you to perform multiple find-and-replace operations efficiently. Prefer this tool over the {{tool_names.patch}} tool when you need to make multiple edits to the same file.\n\nBefore using this tool:\n\n1. Use the Read tool to understand the file's contents and context\n2. Verify the directory path is correct\n\nTo make multiple file edits, provide the following:\n1. file_path: The absolute path to the file to modify (must be absolute, not relative)\n2. edits: An array of edit operations to perform, where each edit contains:\n   - oldString: The text to replace (must match the file contents exactly, including all whitespace and indentation)\n   - newString: The edited text to replace the oldString\n   - replaceAll: Replace all occurrences of oldString. This parameter is optional and defaults to false.\n\nIMPORTANT:\n- All edits are applied in sequence, in the order they are provided\n- Each edit operates on the result of the previous edit\n- All edits must be valid for the operation to succeed - if any edit fails, none will be applied\n- This tool is ideal when you need to make several changes to different parts of the same file\n\nCRITICAL REQUIREMENTS:\n1. All edits follow the same requirements as the single Edit tool\n2. The edits are atomic - either all succeed or none are applied\n3. Plan your edits carefully to avoid conflicts between sequential operations\n\nWARNING:\n- The tool will fail if edits.oldString doesn't match the file contents exactly (including whitespace)\n- The tool will fail if edits.oldString and edits.newString are the same\n- Since edits are applied in sequence, ensure that earlier edits don't affect the text that later edits are trying to find\n\nWhen making edits:\n- Ensure all edits result in idiomatic, correct code\n- Do not leave the code in a broken state\n- Always use absolute file paths (starting with /)\n- Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.\n- Use replaceAll for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance.\n\nIf you want to create a new file, use:\n- A new file path, including dir name if needed\n- First edit: empty oldString and the new file's contents as newString\n- Subsequent edits: normal edit operations on the created content"
+    "description": "Replace exact text in one file.\n- Read the file{{#if tool_names.read}} with `{{tool_names.read}}`{{/if}} before editing it; editing a file this conversation has not read is refused. The `12:` prefix in read output is not file content; only the text after it is.\n- `old_string` must match exactly once unless `replace_all` is set. When it is not in the file exactly, it is matched again with smart quotes, Unicode dashes, no-break spaces and trailing whitespace read as plain ASCII; the file keeps its own characters wherever your edit left `old_string` unchanged. With `replace_all`, this fallback runs only when there is no exact occurrence. A miss reports the closest line in the file.\n- Pass `edits` (a list of `{old_string, new_string, replace_all}`) for several replacements in one call: they apply in order, each seeing the previous result, and all are validated before anything is written, so a failed call leaves the file untouched and names the offending edit. Never combine `edits` with the scalar `old_string`/`new_string`/`replace_all` form.\n- Line endings in `old_string`/`new_string` are matched and written in the file's own style (LF or CRLF).\n- After the write, the file is parsed locally and any syntax errors the edit introduced are reported as a warning.\n{{#if tool_names.undo}}\n- One call is one `{{tool_names.undo}}` step.\n{{/if}}\n{{#if tool_names.write}}\n- Use `{{tool_names.write}}` for new files or a deliberate full rewrite.\n{{/if}}"
   },
   {
     "type": "function",
@@ -419,7 +488,7 @@ expression: actual.tools
       "additionalProperties": false,
       "properties": {
         "path": {
-          "description": "The absolute path of the file to revert to its previous state.",
+          "description": "Path whose latest snapshot should be restored.",
           "type": "string"
         }
       },
@@ -429,7 +498,7 @@ expression: actual.tools
       "type": "object"
     },
     "strict": true,
-    "description": "Reverts the most recent file operation (create/modify/delete) on a specific file. Use this tool when you need to recover from incorrect file changes or if a revert is requested by the user."
+    "description": "Restore one path to its latest snapshot. Every tool that changes a file snapshots it first{{#if tool_names.patch}}; one `{{tool_names.patch}}` call, even with several edits, is one snapshot{{/if}}.\n- Restores file contents and permission modes, symlink targets, whole directory trees, and absence: undoing the creation of a file deletes it. Ownership, timestamps and extended attributes are not restored.\n- Each successful restore pops one snapshot, so repeated calls walk further back. A filesystem error keeps the snapshot for a retry. An unusable snapshot is discarded with an error without changing the path; call again to reach an older entry.\n- Snapshots belong to this conversation and survive a restart of it; the store keeps the newest 100 entries (64 MiB). This is not git and does not touch repository history."
   },
   {
     "type": "function",
@@ -437,8 +506,42 @@ expression: actual.tools
     "parameters": {
       "additionalProperties": false,
       "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "description": "Start `command` and wait up to `timeout` seconds for it.",
+              "enum": [
+                "run"
+              ],
+              "type": "string"
+            },
+            {
+              "description": "Report a running job's new output without waiting.",
+              "enum": [
+                "poll"
+              ],
+              "type": "string"
+            },
+            {
+              "description": "Wait up to `timeout` more seconds for a running job.",
+              "enum": [
+                "wait"
+              ],
+              "type": "string"
+            },
+            {
+              "description": "Stop a running job (SIGTERM, then SIGKILL, to its process group).",
+              "enum": [
+                "kill"
+              ],
+              "type": "string"
+            }
+          ],
+          "description": "run (default), poll, wait or kill."
+        },
         "command": {
-          "description": "The shell command to execute.",
+          "default": "",
+          "description": "The command to run (required for action \"run\").",
           "type": "string"
         },
         "cwd": {
@@ -450,7 +553,7 @@ expression: actual.tools
               "type": "null"
             }
           ],
-          "description": "The working directory where the command should be executed.\nIf not specified, defaults to the current working directory from the\nenvironment."
+          "description": "Working directory for the command (default: the current directory)."
         },
         "description": {
           "anyOf": [
@@ -461,7 +564,7 @@ expression: actual.tools
               "type": "null"
             }
           ],
-          "description": "Clear, concise description of what this command does. Recommended to be\n5-10 words for simple commands. For complex commands with pipes or\nmultiple operations, provide more context. Examples: \"Lists files in\ncurrent directory\", \"Installs package dependencies\", \"Compiles Rust\nproject with release optimizations\"."
+          "description": "Short description of what the command does."
         },
         "env": {
           "anyOf": [
@@ -475,24 +578,50 @@ expression: actual.tools
               "type": "null"
             }
           ],
-          "description": "Environment variable names to pass to command execution (e.g., [\"PATH\",\n\"HOME\", \"USER\"]). The system automatically reads the specified\nvalues and applies them during command execution."
+          "description": "Extra environment variable names to pass through, on top of the\nconfigured allow-list."
+        },
+        "handle": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Job id from a `HANDLE n RUNNING` line, for poll/wait/kill (default:\nthe most recent running job)."
         },
         "keep_ansi": {
-          "description": "Whether to preserve ANSI escape codes in the output.\nIf true, ANSI escape codes will be preserved in the output.\nIf false (default), ANSI escape codes will be stripped from the output.",
+          "description": "Keep ANSI escape codes in the output (default false).",
           "type": "boolean"
+        },
+        "timeout": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Seconds to wait before returning a handle (run) or to keep waiting\n(wait); default 30. The command is never killed when the window ends."
         }
       },
       "required": [
+        "action",
         "command",
         "cwd",
         "description",
         "env",
-        "keep_ansi"
+        "handle",
+        "keep_ansi",
+        "timeout"
       ],
       "type": "object"
     },
     "strict": true,
-    "description": "Executes shell commands. The `cwd` parameter sets the working directory for command execution. If not specified, defaults to `{{env.cwd}}`.\n\nCRITICAL: Do NOT use `cd` commands in the command string. This is FORBIDDEN. Always use the `cwd` parameter to set the working directory instead. Any use of `cd` in the command is redundant, incorrect, and violates the tool contract.\n\nIMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.\n\nBefore executing the command, please follow these steps:\n\n1. Directory Verification:\n   - If the command will create new directories or files, first use `shell` with `ls` to verify the parent directory exists and is the correct location\n   - For example, before running \"mkdir foo/bar\", first use `ls foo` to check that \"foo\" exists and is the intended parent directory\n\n2. Command Execution:\n   - Always quote file paths that contain spaces with double quotes (e.g., python \"path with spaces/script.py\")\n   - Examples of proper quoting:\n     - mkdir \"/Users/name/My Documents\" (correct)\n     - mkdir /Users/name/My Documents (incorrect - will fail)\n     - python \"/path/with spaces/script.py\" (correct)\n     - python /path/with spaces/script.py (incorrect - will fail)\n   - After ensuring proper quoting, execute the command.\n   - Capture the output of the command.\n\nUsage notes:\n  - The command argument is required.\n  - It is very helpful if you write a clear, concise description of what this command does in 5-10 words.\n  - If the output exceeds {{config.stdoutMaxPrefixLength}} prefix lines or {{config.stdoutMaxSuffixLength}} suffix lines, or if a line exceeds {{config.stdoutMaxLineLength}} characters, it will be truncated and the full output will be written to a temporary file. You can use read with start_line/end_line to read specific sections or fs_search to search the full content. Because of this, you should NOT use `head`, `tail`, or other truncation commands to limit output - just run the command directly.\n  - Do not use {{tool_names.shell}} with the `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands, unless explicitly instructed or when these commands are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands:\n    - File search: Use `{{tool_names.fs_search}}` (NOT find or ls)\n    - Content search: Use `{{tool_names.fs_search}}` with regex (NOT grep or rg)\n    - Read files: Use `{{tool_names.read}}` (NOT cat/head/tail)\n    - Edit files: Use `{{tool_names.patch}}`(NOT sed/awk)\n    - Write files: Use `{{tool_names.write}}` (NOT echo >/cat <<EOF)\n    - Communication: Output text directly (NOT echo/printf)\n  - When issuing multiple commands:\n    - If the commands are independent and can run in parallel, make multiple `{{tool_names.shell}}` tool calls in a single message. For example, if you need to run \"git status\" and \"git diff\", send a single message with two `{{tool_names.shell}}` tool calls in parallel.\n    - If the commands depend on each other and must run sequentially, use a single `{{tool_names.shell}}` call with '&&' to chain them together (e.g., `git add . && git commit -m \"message\" && git push`). For instance, if one operation must complete before another starts (like mkdir before cp, write before shell for git operations, or git add before git commit), run these operations sequentially instead.\n    - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail\n    - DO NOT use newlines to separate commands (newlines are ok in quoted strings)\n  - DO NOT use `cd <directory> && <command>`. Use the `cwd` parameter to change directories instead.\n\nGood examples:\n  - With explicit cwd: cwd=\"/foo/bar\" with command: pytest tests\n\nBad example:\n  cd /foo/bar && pytest tests\n\nReturns complete output including stdout, stderr, and exit code for diagnostic purposes."
+    "description": "Run one command with `{{env.shell}}` and return its exit code, stdout and stderr. Under bash and zsh a pipeline fails when any stage fails (`pipefail`), so `false | cat` reports exit 1. The working directory is `cwd`, default `{{env.cwd}}`; set `cwd` instead of using `cd`.\n\nLong output comes back as its head and its tail, with a marker between them naming the bytes left out and the file that holds the whole stream:\n\n    [truncated: output budget (… bytes) reached; stdout bytes 25000-980000 of 1004000 (955000 bytes) are not shown; the whole stdout is at /path/shell-3-….log — read it on with range {\"start_byte\": 25000}]\n\nRead any part of that file{{#if tool_names.read}} with `{{tool_names.read}}` and a byte range{{/if}}, so do not pipe through `head` or `tail` just to shrink the output. Stdin is `/dev/null` and there is no terminal: a command that reads input gets end-of-file, and a password or confirmation prompt gets no answer.\n\nA command does not have to finish before you get an answer. The call waits `timeout` seconds (default 30); a command that finishes inside that window comes back whole, and one still running comes back as a handle with whatever it has printed so far:\n\n    command still running after 30s (handle 3, pid 4242). ...\n    HANDLE 3 RUNNING\n\nThe command is never killed by the wait. Then `action=\"poll\", handle=\"3\"` returns new output and whether it is still running, `action=\"wait\", handle=\"3\", timeout=N` blocks up to N more seconds, and `action=\"kill\", handle=\"3\"` stops it (SIGTERM, then SIGKILL, to its whole process group). `handle` defaults to the most recent running job. Do a poll before assuming a long build or test run has failed. Interrupting the turn kills a command the call is still waiting on.\n\nThe command gets a filtered environment: the configured allow-list (by default PATH, HOME, USER, LANG, LC_ALL, TERM, PWD, SHELL) plus the names you list in `env`. When the command references a variable that was filtered out, the result says so.\n\n- Independent commands can go in parallel calls in one response; chain dependent ones with `&&` in one call.\n{{#if tool_names.fs_search}}\n- Search with `{{tool_names.fs_search}}`, not `grep`, `rg`, or `find`.\n{{/if}}\n{{#if tool_names.read}}\n- Read files with `{{tool_names.read}}`, not `cat`, `head`, or `tail`.\n{{/if}}\n{{#if tool_names.patch}}\n- Edit files with `{{tool_names.patch}}`, not `sed` or `awk`.\n{{/if}}\n{{#if tool_names.write}}\n- Write files with `{{tool_names.write}}`, not redirects or heredocs.\n{{/if}}\n{{#if tool_names.remove}}\n- Delete with `{{tool_names.remove}}`, not `rm`.\n{{/if}}"
   },
   {
     "type": "function",
@@ -501,121 +630,52 @@ expression: actual.tools
       "additionalProperties": false,
       "description": "Input type for the net fetch tool",
       "properties": {
+        "body": {
+          "description": "Request body text.",
+          "nullable": true,
+          "type": "string"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Request headers, name to value.",
+          "nullable": true,
+          "type": "object"
+        },
+        "json_body": {
+          "additionalProperties": true,
+          "description": "Request body as JSON (sets Content-Type: application/json); not with\n`body`.",
+          "nullable": true,
+          "type": "object"
+        },
+        "method": {
+          "description": "HTTP method (default GET).",
+          "nullable": true,
+          "type": "string"
+        },
         "raw": {
-          "anyOf": [
-            {
-              "type": "boolean"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Get raw content without any markdown conversion (default: false)"
+          "description": "Return the body as is, without HTML-to-markdown conversion (default\nfalse).",
+          "nullable": true,
+          "type": "boolean"
+        },
+        "save": {
+          "description": "Stream the response body to this path instead of returning it; no size\nlimit, resumable.",
+          "nullable": true,
+          "type": "string"
         },
         "url": {
-          "description": "URL to fetch",
+          "description": "URL to fetch: http(s):// or file://.",
           "type": "string"
         }
       },
       "required": [
-        "raw",
         "url"
       ],
       "type": "object"
     },
-    "strict": true,
-    "description": "Retrieves content from URLs as markdown or raw text. Enables access to current online information including websites, APIs and documentation. Use for obtaining up-to-date information beyond training data, verifying facts, or retrieving specific online content. Handles HTTP/HTTPS and converts HTML to readable markdown by default. Cannot access private/restricted resources requiring authentication. Respects robots.txt and may be blocked by anti-scraping measures. For large pages, returns the first 40,000 characters and stores the complete content in a temporary file for subsequent access.\n\nIMPORTANT: This tool only handles text-based content (HTML, JSON, XML, plain text, etc.). It will reject binary file downloads (.tar.gz, .zip, .bin, .deb, images, audio, video, etc.) with an error. To download binary files, use the `shell` tool with `curl -fLo <output_file> <url>` instead."
-  },
-  {
-    "type": "function",
-    "name": "followup",
-    "parameters": {
-      "additionalProperties": false,
-      "properties": {
-        "multiple": {
-          "anyOf": [
-            {
-              "type": "boolean"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "If true, allows selecting multiple options; if false (default), only one\noption can be selected"
-        },
-        "option1": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "First option to choose from"
-        },
-        "option2": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Second option to choose from"
-        },
-        "option3": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Third option to choose from"
-        },
-        "option4": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Fourth option to choose from"
-        },
-        "option5": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Fifth option to choose from"
-        },
-        "question": {
-          "description": "Question to ask the user",
-          "type": "string"
-        }
-      },
-      "required": [
-        "multiple",
-        "option1",
-        "option2",
-        "option3",
-        "option4",
-        "option5",
-        "question"
-      ],
-      "type": "object"
-    },
-    "strict": true,
-    "description": "Use this tool when you encounter ambiguities, need clarification, or require more details to proceed effectively. Use this tool judiciously to maintain a balance between gathering necessary information and avoiding excessive back-and-forth."
+    "strict": false,
+    "description": "Fetch a URL over HTTP(S) or `file://`.\n\nHTML comes back as markdown with links made absolute, so you can fetch them as-is; `raw=true` returns the source instead. `method`, `headers`, `body` and `json_body` make any HTTP request (a GET that saves nothing checks robots.txt first). `save` streams the body to that path instead of returning it, with no size limit; a partial download left by an interrupted save resumes with a Range request, and the previous file at that path is snapshotted first{{#if tool_names.undo}} (`{{tool_names.undo}}` brings it back){{/if}}. Binary responses come back as a short descriptor naming the type and size; pass `save` to get the bytes. Images come back as images when the model accepts image input. Unsaved responses are read up to 32 MiB and bounded by a 30-second timeout; a large text result is written to a file whose path and continuation range the result names."
   },
   {
     "type": "function",
@@ -624,27 +684,32 @@ expression: actual.tools
       "additionalProperties": false,
       "properties": {
         "content": {
-          "description": "The content to write to the plan file. This should be the complete\nplan content in markdown format.",
+          "description": "The complete plan content in markdown, written verbatim.",
           "type": "string"
         },
+        "overwrite": {
+          "description": "Replace an existing plan with the same name and version (default\nfalse).",
+          "type": "boolean"
+        },
         "plan_name": {
-          "description": "The name of the plan (will be used in the filename)",
+          "description": "The name of the plan (sanitised into the filename).",
           "type": "string"
         },
         "version": {
-          "description": "The version of the plan (e.g., \"v1\", \"v2\", \"1.0\")",
+          "description": "The version of the plan (e.g., \"v1\", \"v2\", \"1.0\"; sanitised into the\nfilename).",
           "type": "string"
         }
       },
       "required": [
         "content",
+        "overwrite",
         "plan_name",
         "version"
       ],
       "type": "object"
     },
     "strict": true,
-    "description": "Creates a new plan file with the specified name, version, and content. Use this tool to create structured project plans, task breakdowns, or implementation strategies that can be tracked and referenced throughout development sessions."
+    "description": "Write a markdown plan to `plans/{date}-{plan_name}-{version}.md` under the working directory (or the configured plans directory).\n- Use it for durable implementation plans, task breakdowns, investigation notes or strategy documents that should outlive this turn, or when the user asks for a plan to be written down. Do not create documentation proactively.\n- `plan_name` and `version` are sanitised into the filename: anything other than letters, digits, `-`, `_` and `.` becomes `-`.\n- `content` is written verbatim.\n- An existing plan with the same date, name and version is left unchanged unless `overwrite=true`; an overwrite reports that it replaced the plan{{#if tool_names.undo}}, and the previous contents are snapshotted so `{{tool_names.undo}}` brings them back{{/if}}.\n- This is for plans, not source-code edits."
   },
   {
     "type": "function",
@@ -728,9 +793,69 @@ expression: actual.tools
       "additionalProperties": false,
       "description": "Input structure for the Task tool - delegates work to specialized agents",
       "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "description": "Start `command` and wait up to `timeout` seconds for it.",
+              "enum": [
+                "run"
+              ],
+              "type": "string"
+            },
+            {
+              "description": "Report a running job's new output without waiting.",
+              "enum": [
+                "poll"
+              ],
+              "type": "string"
+            },
+            {
+              "description": "Wait up to `timeout` more seconds for a running job.",
+              "enum": [
+                "wait"
+              ],
+              "type": "string"
+            },
+            {
+              "description": "Stop a running job (SIGTERM, then SIGKILL, to its process group).",
+              "enum": [
+                "kill"
+              ],
+              "type": "string"
+            }
+          ],
+          "description": "run (default), poll, wait or kill; poll/wait/kill act on a background\ntask's handle."
+        },
         "agent_id": {
-          "description": "The ID of the specialized agent to delegate to (e.g., \"forge\", \"muse\",\n\"sage\")",
+          "default": "",
+          "description": "The agent the workers run as (required to start workers).",
           "type": "string"
+        },
+        "background": {
+          "description": "Run the workers in the background and return a handle at once.",
+          "type": "boolean"
+        },
+        "handle": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Handle of a background task (default: your most recent running one)."
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Model the workers run on instead of the agent's configured model. Leave\nunset unless the user asks for it."
         },
         "session_id": {
           "anyOf": [
@@ -741,24 +866,1135 @@ expression: actual.tools
               "type": "null"
             }
           ],
-          "description": "Optional session ID to continue an existing agent session. If not\nprovided, a new stateless session will be created. Use this to\nmaintain context across multiple task invocations with the same\nagent."
+          "description": "Resume an earlier worker session (one task only). An unknown id is an\nerror."
         },
         "tasks": {
-          "description": "A list of clear and detailed descriptions of the tasks to be performed\nby the agent in parallel. Provide sufficient context and specific\nrequirements to enable the agent to understand and execute the work\naccurately.",
+          "default": [],
+          "description": "Self-contained prompts, one per worker; they run in parallel (required\nto start workers).",
           "items": {
             "type": "string"
           },
           "type": "array"
+        },
+        "timeout": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Seconds a wait blocks (default: until the task ends)."
         }
       },
       "required": [
+        "action",
         "agent_id",
+        "background",
+        "handle",
+        "model",
         "session_id",
-        "tasks"
+        "tasks",
+        "timeout"
       ],
       "type": "object"
     },
     "strict": true,
-    "description": "Launch a new agent to handle complex, multi-step tasks autonomously. \n\nThe {{tool_names.task}} tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.\n\nAvailable agent types and the tools they have access to:\n{{#each agents}}\n- **{{id}}**{{#if description}}: {{description}}{{/if}}{{#if tools}}\n  - Tools: {{#each tools}}{{this}}{{#unless @last}}, {{/unless}}{{/each}}{{/if}}\n{{/each}}\n\nWhen using the {{tool_names.task}} tool, you must specify a agent_id parameter to select which agent type to use.\n\nWhen NOT to use the {{tool_names.task}} tool:\n- If you want to read a specific file path, use the {{tool_names.read}} or {{tool_names.fs_search}} tool instead of the {{tool_names.task}} tool, to find the match more quickly\n- If you are searching for a specific class definition like \"class Foo\", use the {{tool_names.fs_search}} tool instead, to find the match more quickly\n- If you are searching for code within a specific file or set of 2-3 files, use the {{tool_names.read}} tool instead of the {{tool_names.task}} tool, to find the match more quickly\n- Other tasks that are not related to the agent descriptions above\n\n\nUsage notes:\n- Always include a short description (3-5 words) summarizing what the agent will do\n- Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses\n- When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.\n- Agents can be resumed using the \\`session_id\\` parameter by passing the agent ID from a previous invocation. When resumed, the agent continues with its full previous context preserved. When NOT resuming, each invocation starts fresh and you should provide a detailed task description with all necessary context.\n- When the agent is done, it will return a single message back to you along with its agent ID. You can use this ID to resume the agent later if needed for follow-up work.\n- Provide clear, detailed prompts so the agent can work autonomously and return exactly the information you need.\n- Agents with \"access to current context\" can see the full conversation history before the tool call. When using these agents, you can write concise prompts that reference earlier context (e.g., \"investigate the error discussed above\") instead of repeating information. The agent will receive all prior messages and understand the context.\n- The agent's outputs should generally be trusted\n- Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent\n- If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.\n- If the user specifies that they want you to run agents \"in parallel\", you MUST send a single message with multiple {{tool_names.task}} tool use content blocks. For example, if you need to launch both a build-validator agent and a test-runner agent in parallel, send a single message with both tool calls.\n\nExample usage:\n\n<example_agent_descriptions>\n\"test-runner\": use this agent after you are done writing code to run tests\n\"greeting-responder\": use this agent when to respond to user greetings with a friendly joke\n</example_agent_description>\n\n<example>\nuser: \"Please write a function that checks if a number is prime\"\nassistant: Sure let me write a function that checks if a number is prime\nassistant: First let me use the {{tool_names.write}} tool to write a function that checks if a number is prime\nassistant: I'm going to use the {{tool_names.write}} tool to write the following code:\n<code>\nfunction isPrime(n) {\n  if (n <= 1) return false\n  for (let i = 2; i * i <= n; i++) {\n    if (n % i === 0) return false\n  }\n  return true\n}\n</code>\n<commentary>\nSince a significant piece of code was written and the task was completed, now use the test-runner agent to run the tests\n</commentary>\nassistant: Now let me use the test-runner agent to run the tests\nassistant: Uses the {{tool_names.task}} tool to launch the test-runner agent\n</example>\n\n<example>\nuser: \"Hello\"\n<commentary>\nSince the user is greeting, use the greeting-responder agent to respond with a friendly joke\n</commentary>\nassistant: \"I'm going to use the {{tool_names.task}} tool to launch the greeting-responder agent\"\n</example>"
+    "description": "Launch one or more worker agents for complex, multi-step work. Each worker runs autonomously in its own conversation and returns one result to you; the result is not shown to the user, so summarize it in your reply.\n\nAvailable agents and their tools:\n{{#each agents}}\n- **{{id}}**{{#if description}}: {{description}}{{/if}}{{#if tools}}\n  - Tools: {{#each tools}}{{this}}{{#unless @last}}, {{/unless}}{{/each}}{{/if}}\n{{/each}}\n\nWhen to use: open-ended searches that need several search/read rounds, independent investigations that can run concurrently, work that suits another agent's persona and tools.\nWhen not to use: anything one or two direct tool calls finish{{#if tool_names.read}}, such as reading one known file or two or three files (use `{{tool_names.read}}`){{/if}}{{#if tool_names.fs_search}}, or searching for an exact identifier or definition (use `{{tool_names.fs_search}}`){{/if}}.\n\nInputs:\n- `tasks` (required to start workers): one self-contained prompt per worker. A fresh worker cannot see this conversation; include paths, error text, constraints, the expected output shape, and whether it may change code.\n- `agent_id` (required to start workers): the agent the workers run as. An unknown agent is an error and no worker starts.\n- `session_id`: resume a worker session (the id is named in an earlier result as `session_id=…`). It runs exactly one task; an unknown id is an error.\n- `model`: run the workers on another model. Leave it unset unless the user asks for it.\n\nParallelism: the tasks of one call run concurrently through a bounded worker pool, and several `{{tool_names.task}}` calls in one response also run concurrently. One task returns the worker's reply verbatim; several come back numbered under a `TASK_RESULTS` header in task order. A worker that fails reports its error in its own slot without discarding the others. Each reply is held to an equal share of the result budget. Workers that start their own tasks run one level deeper; past the configured depth limit a call is refused.\n\nBackground: a call blocks until every worker finishes. With `background=true` it returns at once with a handle while the workers keep running:\n\n    task running in the background (handle t1): ...\n    HANDLE t1 RUNNING\n\n`action=\"poll\", handle=\"t1\"` says whether it is still running and returns the result once done; `action=\"wait\", handle=\"t1\", timeout=N` blocks up to N seconds, or until the end without `timeout`; `action=\"kill\", handle=\"t1\"` stops it. `handle` defaults to your most recent running task, and you see only tasks this conversation started. The finished result is also written to the file the handle names, and if you have not polled it by your next turn, a reminder names that file. Use background runs for slow, independent work you do not need before your next step."
+  },
+  {
+    "type": "function",
+    "name": "tool_discovery",
+    "parameters": {
+      "additionalProperties": false,
+      "description": "Input for `tool_discovery`: search the catalog of loadable tools and\nskills, or load one by id.",
+      "properties": {
+        "kind": {
+          "anyOf": [
+            {
+              "enum": [
+                "native",
+                "mcp",
+                "skill"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Only rows of this kind: native, mcp or skill."
+        },
+        "load": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Catalog id to load, such as `native:lsp`, `mcp:github__list_issues`\nor `skill:review`; a tool's bare name also works."
+        },
+        "offset": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Continue a truncated result at its `next_offset`."
+        },
+        "query": {
+          "description": "Intent or words to search for; empty returns a compact index.",
+          "type": "string"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Only rows with this source: an MCP server name, `native`, `skill`, or\n`mcp` for every MCP server."
+        }
+      },
+      "required": [
+        "kind",
+        "load",
+        "offset",
+        "query",
+        "source"
+      ],
+      "type": "object"
+    },
+    "strict": true,
+    "description": "Search the catalog of tools and skills this agent may load but does not have yet, or load one by its id.\n- An empty `query` returns a compact index (ids, names, sources; capped at 4 KiB). A search ranks rows by BM25 over names, descriptions and parameter names and adds short descriptions (capped at 8 KiB). `kind` (native, mcp, skill) and `source` (an MCP server's name, `native`, `skill`, or `mcp` for every server) narrow the rows. When `truncated` is true, repeat the call with `offset` set to `next_offset`.\n- `load` takes the `id` of a row whose `loadable` is true, or a tool's bare name. Loading a tool publishes its full schema from the next model call on, for the rest of this conversation. Loading a skill returns its instructions and loads the tools it declares that this agent may use. Searching with `kind=\"mcp\"`, `source=\"mcp\"` or an MCP server's name as `source` connects to those servers first; a server that is not connected yet or failed to connect appears as a status row, which is not loadable.\n- Load first, then call the tool in a later response: a tool is not callable in the same response that loads it. Calling a tool that is not loaded returns an error naming the exact load call."
+  },
+  {
+    "type": "function",
+    "name": "mcp_resource_list",
+    "parameters": {
+      "additionalProperties": false,
+      "description": "Input for MCP controls that act on a whole server (M3).",
+      "properties": {
+        "server": {
+          "description": "Exact MCP server name (from a `tool_discovery` mcp status row).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "server"
+      ],
+      "type": "object"
+    },
+    "strict": true,
+    "description": "List the resources of an MCP server. Before using it, run tool_discovery with kind=\"mcp\" (or an MCP server name as source) to connect the servers, then pass the exact server name of an mcp status row. Configured secrets are redacted from the result."
+  },
+  {
+    "type": "function",
+    "name": "mcp_resource_templates",
+    "parameters": {
+      "additionalProperties": false,
+      "description": "Input for MCP controls that act on a whole server (M3).",
+      "properties": {
+        "server": {
+          "description": "Exact MCP server name (from a `tool_discovery` mcp status row).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "server"
+      ],
+      "type": "object"
+    },
+    "strict": true,
+    "description": "List the resource templates of an MCP server. Before using it, run tool_discovery with kind=\"mcp\" (or an MCP server name as source) to connect the servers, then pass the exact server name of an mcp status row. Configured secrets are redacted from the result."
+  },
+  {
+    "type": "function",
+    "name": "mcp_resource_read",
+    "parameters": {
+      "additionalProperties": false,
+      "description": "Input for MCP controls that act on one resource (M3).",
+      "properties": {
+        "server": {
+          "description": "Exact MCP server name (from a `tool_discovery` mcp status row).",
+          "type": "string"
+        },
+        "uri": {
+          "description": "Exact resource URI, as returned by `mcp_resource_list` or\n`mcp_resource_templates`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "server",
+        "uri"
+      ],
+      "type": "object"
+    },
+    "strict": true,
+    "description": "Read an MCP resource by URI. Before using it, run tool_discovery with kind=\"mcp\" (or an MCP server name as source) to connect the servers, then pass the exact server name of an mcp status row. Copy an exact URI from mcp_resource_list or mcp_resource_templates. Configured secrets are redacted from the result."
+  },
+  {
+    "type": "function",
+    "name": "mcp_resource_subscribe",
+    "parameters": {
+      "additionalProperties": false,
+      "description": "Input for MCP controls that act on one resource (M3).",
+      "properties": {
+        "server": {
+          "description": "Exact MCP server name (from a `tool_discovery` mcp status row).",
+          "type": "string"
+        },
+        "uri": {
+          "description": "Exact resource URI, as returned by `mcp_resource_list` or\n`mcp_resource_templates`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "server",
+        "uri"
+      ],
+      "type": "object"
+    },
+    "strict": true,
+    "description": "Subscribe to update notifications for an MCP resource. Before using it, run tool_discovery with kind=\"mcp\" (or an MCP server name as source) to connect the servers, then pass the exact server name of an mcp status row. Copy an exact URI from mcp_resource_list. Configured secrets are redacted from the result."
+  },
+  {
+    "type": "function",
+    "name": "mcp_resource_unsubscribe",
+    "parameters": {
+      "additionalProperties": false,
+      "description": "Input for MCP controls that act on one resource (M3).",
+      "properties": {
+        "server": {
+          "description": "Exact MCP server name (from a `tool_discovery` mcp status row).",
+          "type": "string"
+        },
+        "uri": {
+          "description": "Exact resource URI, as returned by `mcp_resource_list` or\n`mcp_resource_templates`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "server",
+        "uri"
+      ],
+      "type": "object"
+    },
+    "strict": true,
+    "description": "Stop update notifications for an MCP resource. Before using it, run tool_discovery with kind=\"mcp\" (or an MCP server name as source) to connect the servers, then pass the exact server name of an mcp status row. Copy an exact URI from mcp_resource_list. Configured secrets are redacted from the result."
+  },
+  {
+    "type": "function",
+    "name": "mcp_prompt_list",
+    "parameters": {
+      "additionalProperties": false,
+      "description": "Input for MCP controls that act on a whole server (M3).",
+      "properties": {
+        "server": {
+          "description": "Exact MCP server name (from a `tool_discovery` mcp status row).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "server"
+      ],
+      "type": "object"
+    },
+    "strict": true,
+    "description": "List the prompts of an MCP server. Before using it, run tool_discovery with kind=\"mcp\" (or an MCP server name as source) to connect the servers, then pass the exact server name of an mcp status row. Configured secrets are redacted from the result."
+  },
+  {
+    "type": "function",
+    "name": "mcp_prompt_get",
+    "parameters": {
+      "additionalProperties": false,
+      "description": "Input for `mcp_prompt_get` (M3).",
+      "properties": {
+        "arguments": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "properties": {},
+              "required": [],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Prompt arguments, name to string value."
+        },
+        "name": {
+          "description": "Exact prompt name, as returned by `mcp_prompt_list`.",
+          "type": "string"
+        },
+        "server": {
+          "description": "Exact MCP server name (from a `tool_discovery` mcp status row).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "arguments",
+        "name",
+        "server"
+      ],
+      "type": "object"
+    },
+    "strict": true,
+    "description": "Get an MCP prompt and its messages. Before using it, run tool_discovery with kind=\"mcp\" (or an MCP server name as source) to connect the servers, then pass the exact server name of an mcp status row. Copy an exact prompt name from mcp_prompt_list. Configured secrets are redacted from the result."
+  },
+  {
+    "type": "function",
+    "name": "terminal_session",
+    "parameters": {
+      "additionalProperties": false,
+      "description": "T15: drive a persistent terminal.",
+      "properties": {
+        "action": {
+          "description": "start, send, look, stop or list.",
+          "type": "string"
+        },
+        "cols": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Columns (start only; default 120)."
+        },
+        "command": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Command to run (start)."
+        },
+        "cwd": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Working directory (start; default the current directory)."
+        },
+        "keys": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Comma-separated keys to send (send)."
+        },
+        "rows": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Rows (start only; default 40)."
+        },
+        "session": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Session name (default \"main\")."
+        },
+        "wait_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Milliseconds to wait for output before reading the screen (default\n700, at most 10000)."
+        }
+      },
+      "required": [
+        "action",
+        "cols",
+        "command",
+        "cwd",
+        "keys",
+        "rows",
+        "session",
+        "wait_ms"
+      ],
+      "type": "object"
+    },
+    "strict": true,
+    "description": "Drive an interactive program through a persistent terminal (PTY): TUIs, REPLs, pagers, editors, installers and prompts. Sessions persist across calls for this conversation; a running process is normal, and stop sessions when you are done.{{#if tool_names.shell}} `{{tool_names.shell}}` is for ordinary non-interactive commands.{{/if}}\n- `action`: `start` (needs `command`; `cols`/`rows` only here, default 120x40), `send` (`keys`), `look`, `stop`, `list`.\n- `keys` is comma-separated: named keys are `enter`, `tab`, `esc`, the arrows (`up`, `down`, `left`, `right`), `home`, `end`, `pgup`, `pgdn`, `backspace`, `delete`, `ctrl-c`, `ctrl-d`, `ctrl-l`, `ctrl-x`, `ctrl-z` and `f1` to `f12`; anything else is typed verbatim, and `comma` types a comma.\n- Each result has the rendered screen lines, cursor position and process state (`still_running`, `exit_status`). `lines_changed` and `screen_responded` compare against the previous observation: after `send`, change during the wait window after the keys (not proof the keys caused it); after `look`, passive change since last time.\n{{#if tool_names.terminal_snapshot}}\n- `{{tool_names.terminal_snapshot}}` renders the screen as a PNG when text cannot show spacing, colour, borders or clipping, and also resets that comparison baseline.\n{{/if}}\n- Under a jail (`-C DIR`) the command runs in the same jail as the shell tool."
+  },
+  {
+    "type": "function",
+    "name": "terminal_snapshot",
+    "parameters": {
+      "additionalProperties": false,
+      "description": "T15: render a terminal session's screen as a PNG.",
+      "properties": {
+        "session": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Session name (default \"main\")."
+        },
+        "wait_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Milliseconds to wait for output first (default 100)."
+        }
+      },
+      "required": [
+        "session",
+        "wait_ms"
+      ],
+      "type": "object"
+    },
+    "strict": true,
+    "description": "Render the current screen of a terminal session as a PNG, for judging layout, borders, colours, cursor placement, wrapping or clipping that text cannot show. The session must already be started. The result is the image when the model accepts images, and always names the file it was written to."
+  },
+  {
+    "type": "function",
+    "name": "lsp",
+    "parameters": {
+      "additionalProperties": false,
+      "description": "T18: language-server queries.",
+      "properties": {
+        "character": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "1-based column (definition, references, hover)."
+        },
+        "file_path": {
+          "description": "File to query.",
+          "type": "string"
+        },
+        "line": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "1-based line (definition, references, hover)."
+        },
+        "operation": {
+          "description": "diagnostics, definition, references or hover.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "character",
+        "file_path",
+        "line",
+        "operation"
+      ],
+      "type": "object"
+    },
+    "strict": true,
+    "description": "Ask a language server about a source file: `diagnostics` (errors and warnings in the file), `definition`, `references` or `hover` (type and docs) at a position. The server is picked by extension from what is on PATH: rust-analyzer for Rust, basedpyright or pyright for Python, gopls for Go, typescript-language-server for TypeScript and JavaScript, clangd for C and C++. A file no installed server covers returns an error naming what was looked for.\n- Each call sends the file as it is on disk now, so call `diagnostics` after an edit to check it. The first call for a project starts the server and can take a while; later calls reuse it. A server still indexing may return nothing; call again.\n- A position is `line` and `character`, both 1-based.\n- Locations come back as `path:line:column: source line`, relative to the working directory when under it."
+  },
+  {
+    "type": "function",
+    "name": "kernel",
+    "parameters": {
+      "additionalProperties": false,
+      "description": "T16: persistent Python kernel.",
+      "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "run (default), poll, wait, interrupt, restart or kill."
+        },
+        "code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Python code to run (run)."
+        },
+        "handle": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Handle of a run that is still going (poll, wait)."
+        },
+        "timeout": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Seconds a run (or wait) blocks before returning a handle (default 120)."
+        }
+      },
+      "required": [
+        "action",
+        "code",
+        "handle",
+        "timeout"
+      ],
+      "type": "object"
+    },
+    "strict": true,
+    "description": "Execute Python in a persistent IPython kernel (Jupyter). State survives between calls: functions, imports, open connections and loaded data defined in one call are there in the next.\n- `action`: `run` (default) submits `code`; `poll` returns what a running cell produced since the last read; `wait` blocks for it up to `timeout`; `interrupt` stops the cell (the namespace survives); `restart` replaces the kernel (destroys every definition); `kill` shuts it down.\n- `timeout` (default 120 seconds) is the longest one call blocks. A cell that finishes inside it comes back whole; one still running comes back as a handle, `HANDLE <n> RUNNING`, and a new `code` is refused while it runs.\n- stdout, stderr, results and tracebacks come back; images are written to files and reported as `IMAGE <path>`. A finished cell ends with a `NAMESPACE` line listing the functions and classes defined so far.\n- Cells can call tools: the namespace holds `tools`, and `tools.<name>(...)` runs the tool `<name>` with keyword arguments and returns its result text. Each call goes through the same checks as a direct call (allowed tools, argument validation, bans, read-before-edit); a refusal raises `tools.ToolError`. `tools.names()` lists the callable tools; `kernel` and `toolbox` are not callable from a cell.\n{{#if tool_names.toolbox}}\n- `{{tool_names.toolbox}}` saves functions defined here to disk and loads them into later sessions.\n{{/if}}\n{{#if tool_names.shell}}\n- Use `{{tool_names.shell}}` for builds, tests, git and anything that is a command rather than Python.\n{{/if}}"
+  },
+  {
+    "type": "function",
+    "name": "toolbox",
+    "parameters": {
+      "additionalProperties": false,
+      "description": "T17: the kernel's persistent function library.",
+      "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "list (default), show, save, load, history or delete."
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Function name (show, save, load, history, delete)."
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What the revision changed (save)."
+        },
+        "revision": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Revision to show or load (default the latest)."
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "global (default) or project."
+        },
+        "source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Function source (save): one top-level `def`."
+        }
+      },
+      "required": [
+        "action",
+        "name",
+        "note",
+        "revision",
+        "scope",
+        "source"
+      ],
+      "type": "object"
+    },
+    "strict": true,
+    "description": "Functions that outlive the session: save a function to disk, load saved functions into the kernel, keep every revision with its provenance.\n- `action`: `list` (default; every saved function with its latest revision and scope), `show` (source of the latest or a given `revision`), `save` (`name` plus `source`: one top-level `def name(...)`; `note` says what changed), `load` (execs every saved function, or just `name`, into the kernel), `history` (every revision of `name` with date, session and note), `delete` (removes `name`; its revisions stay in the history file).\n- `scope`: `global` (default, every project) or `project` (`.forge/toolbox/` in the working directory; shadows a global function of the same name).\n- `save` never overwrites: each save is a new revision (`r1`, `r2`, …). It refuses a function that reads a free name the source does not define or import (a session variable, an unsaved helper); the error names every one. Imports used by the function go inside its body or above it in `source`.\n{{#if tool_names.kernel}}\n- Until `load` has run, the `{{tool_names.kernel}}` namespace has none of the saved functions.\n{{/if}}"
+  },
+  {
+    "type": "function",
+    "name": "browse",
+    "parameters": {
+      "additionalProperties": false,
+      "description": "T13: render a page in a real browser engine (obscura).",
+      "properties": {
+        "dump": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "markdown (default), text, html, links, original, assets or cookies."
+        },
+        "screenshot": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Write a PNG screenshot to this path instead of returning the page."
+        },
+        "url": {
+          "description": "http(s):// or file:// URL.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "dump",
+        "screenshot",
+        "url"
+      ],
+      "type": "object"
+    },
+    "strict": true,
+    "description": "Read a web page the way a browser sees it, JavaScript included, through obscura (a self-contained browser engine). Pages that build themselves in JavaScript come back rendered; rendered dumps use a five-second settle window.\n- `dump` (default `markdown`): `markdown` (links made absolute against the page URL), `text`, `html` (the DOM after scripts ran), `links` (URL, tab, anchor text per line), `original` (the raw response body as text), `assets` (one JSON object per sub-resource), `cookies` (the cookie jar as JSON).\n- `screenshot`: a path to save a PNG of the settled page; the result is then only the `SCREENSHOT path=… size=…` line, so call again without it to read the page.\n- A status of 400 or above leads the result with `ERROR: HTTP <code> from <url>` followed by the page.\n- Private, loopback and link-local IP literals are allowed. No POST, headers or body.\n{{#if tool_names.fetch}}\n- Use `{{tool_names.fetch}}` for API calls that need a method, headers or a body.\n{{/if}}\n- obscura comes from forge's managed binaries (`forge tools --install`) or, failing that, PATH."
+  },
+  {
+    "type": "function",
+    "name": "browser_probe",
+    "parameters": {
+      "additionalProperties": false,
+      "description": "T14: drive a page in headless Chromium and capture frames.",
+      "properties": {
+        "click": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "CSS selector to click after load."
+        },
+        "hold_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Milliseconds between the two frames after the action (default 1600)."
+        },
+        "output_dir": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Directory for the frames (default a fresh directory under\ntool-results)."
+        },
+        "press": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Comma-separated keys to press after load (Playwright key names)."
+        },
+        "settle_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Milliseconds to wait after load (default 1200)."
+        },
+        "target": {
+          "description": "URL or local HTML file to open.",
+          "type": "string"
+        },
+        "viewport_height": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Viewport height (default 800)."
+        },
+        "viewport_width": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Viewport width (default 1280)."
+        }
+      },
+      "required": [
+        "click",
+        "hold_ms",
+        "output_dir",
+        "press",
+        "settle_ms",
+        "target",
+        "viewport_height",
+        "viewport_width"
+      ],
+      "type": "object"
+    },
+    "strict": true,
+    "description": "Render and screenshot a page or local HTML file in real headless Chromium (Playwright; WebGL through SwiftShader, no GPU needed) and measure whether an interaction changes it.\n- `click` is a `>`-separated chain of case-insensitive regexes matched against visible button or link text (e.g. `menu>settings`); `press` is a comma-separated list of keys pressed after the clicks.\n- The result lists the PNG frames (after load, after the actions, and `hold_ms` later) with per-frame metrics: size, dominant-colour share, unique colours, changed pixels against the previous frame, WebGL availability, console and page errors. Metrics describe the frames; they do not judge them.\n- Needs `python3` with the `playwright` package and its Chromium; a missing one is reported as an error.\n{{#if tool_names.read}}\n- `{{tool_names.read}}` a returned PNG to look at the frame.\n{{/if}}"
+  },
+  {
+    "type": "function",
+    "name": "serper_search",
+    "parameters": {
+      "additionalProperties": false,
+      "description": "T11: web search through Serper (Google results).",
+      "properties": {
+        "num": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Results (default 8)."
+        },
+        "query": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "num",
+        "query"
+      ],
+      "type": "object"
+    },
+    "strict": true,
+    "description": "Google search via Serper (needs `SERPER_API_KEY`). Keyword queries: exact phrases, names, error messages, recent news. Returns Google's organic results as title, URL and snippet, with the answer box first when there is one.\n{{#if tool_names.tavily_search}}\n`{{tool_names.tavily_search}}` returns extracted page text and a synthesized answer instead of snippets.\n{{/if}}\n{{#if tool_names.exa_search}}\n`{{tool_names.exa_search}}` finds things you can describe but not name.\n{{/if}}\n{{#if tool_names.docs_search}}\n`{{tool_names.docs_search}}` is for library documentation.\n{{/if}}"
+  },
+  {
+    "type": "function",
+    "name": "tavily_search",
+    "parameters": {
+      "additionalProperties": false,
+      "description": "T11: web search through Tavily.",
+      "properties": {
+        "max_results": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Results (default 8)."
+        },
+        "query": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "max_results",
+        "query"
+      ],
+      "type": "object"
+    },
+    "strict": true,
+    "description": "Web search via Tavily (needs `TAVILY_API_KEY`). Each result carries extracted page text, usually with a one-paragraph synthesized answer first, so research and \"how do I\" questions get read without fetching each page.\n{{#if tool_names.serper_search}}\n`{{tool_names.serper_search}}` is for exact phrases and the freshest news.\n{{/if}}\n{{#if tool_names.exa_search}}\n`{{tool_names.exa_search}}` finds things you can describe but not name.\n{{/if}}\n{{#if tool_names.docs_search}}\n`{{tool_names.docs_search}}` is for library documentation.\n{{/if}}"
+  },
+  {
+    "type": "function",
+    "name": "exa_search",
+    "parameters": {
+      "additionalProperties": false,
+      "description": "T11: semantic web search through Exa.",
+      "properties": {
+        "num": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Results (default 8)."
+        },
+        "query": {
+          "description": "Describe what you want in a full sentence.",
+          "type": "string"
+        },
+        "text_chars": {
+          "anyOf": [
+            {
+              "minimum": 100,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Characters of page text per result (default 1500)."
+        }
+      },
+      "required": [
+        "num",
+        "query",
+        "text_chars"
+      ],
+      "type": "object"
+    },
+    "strict": true,
+    "description": "Semantic web search via Exa (needs `EXA_API_KEY`): describe what you want in a full sentence and it finds pages by meaning, each with a slice of page text. Best when you know what you mean but not what it is called.\n{{#if tool_names.serper_search}}\n`{{tool_names.serper_search}}` is for exact strings, names and error messages.\n{{/if}}\n{{#if tool_names.tavily_search}}\n`{{tool_names.tavily_search}}` is for research questions that want a synthesized answer.\n{{/if}}\n{{#if tool_names.docs_search}}\n`{{tool_names.docs_search}}` is for library documentation.\n{{/if}}"
+  },
+  {
+    "type": "function",
+    "name": "docs_search",
+    "parameters": {
+      "additionalProperties": false,
+      "description": "T12: library documentation through Context7.",
+      "properties": {
+        "library": {
+          "description": "Library name, e.g. \"tokio\" or \"react\".",
+          "type": "string"
+        },
+        "tokens": {
+          "anyOf": [
+            {
+              "minimum": 500,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Tokens of documentation to return (default 4000)."
+        },
+        "topic": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What to look up in the docs."
+        }
+      },
+      "required": [
+        "library",
+        "tokens",
+        "topic"
+      ],
+      "type": "object"
+    },
+    "strict": true,
+    "description": "Version-current library documentation via Context7 (`CONTEXT7_API_KEY` optional). Use it before writing code against a third-party library, framework, SDK or API. It resolves `library` to Context7's best match and returns documentation snippets with source URLs. Context7 matches keywords, so a hit is reported only when the requested name (case and separators ignored) is the hit's project name (an id path segment or its title) or one whole word of it; anything else comes back as no match rather than an unrelated project's docs. Set `topic`; an untargeted dump is long.\n{{#if tool_names.serper_search}}\n`{{tool_names.serper_search}}` is for issues, changelogs and discussion around a library.\n{{/if}}"
+  },
+  {
+    "type": "function",
+    "name": "notebook_edit",
+    "parameters": {
+      "additionalProperties": false,
+      "description": "T19: edit one cell of a Jupyter notebook.",
+      "properties": {
+        "cell_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The cell to edit or insert after: its id, or `index:N` (0-based).\nOmit with `insert` to insert at the top."
+        },
+        "cell_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "code or markdown (insert; replace keeps the type when omitted)."
+        },
+        "edit_mode": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "replace (default), insert or delete."
+        },
+        "file_path": {
+          "description": "The `.ipynb` file.",
+          "type": "string"
+        },
+        "new_source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "New cell source (replace, insert)."
+        }
+      },
+      "required": [
+        "cell_id",
+        "cell_type",
+        "edit_mode",
+        "file_path",
+        "new_source"
+      ],
+      "type": "object"
+    },
+    "strict": true,
+    "description": "Change one cell of a Jupyter notebook (.ipynb): `replace` its source (the default), `insert` a new cell after it, or `delete` it. Read the notebook first{{#if tool_names.read}}; `{{tool_names.read}}` shows each cell's id as `[cell N id=ID type]`{{/if}}. A notebook changed on disk since the read is refused; read it again.\n- `cell_id` is the cell's id, or `index:N` (0-based) for notebooks without ids. `insert` with no `cell_id` inserts at the top and needs `cell_type` (`code` or `markdown`).\n- `new_source` is the cell's whole new source. A replaced code cell loses its outputs and execution count.\n- The notebook keeps its JSON layout (one-space indent, trailing newline).\n{{#if tool_names.undo}}\n- The notebook is snapshotted first, so `{{tool_names.undo}}` restores it.\n{{/if}}"
+  },
+  {
+    "type": "function",
+    "name": "wiki_convert",
+    "parameters": {
+      "additionalProperties": false,
+      "description": "T25: convert one file for a wiki vault.",
+      "properties": {
+        "file_path": {
+          "description": "File to convert.",
+          "type": "string"
+        },
+        "vault": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Vault directory media is copied into (`<vault>/assets/`)."
+        }
+      },
+      "required": [
+        "file_path",
+        "vault"
+      ],
+      "type": "object"
+    },
+    "strict": true,
+    "description": "Convert one file for a wiki vault: text, code and structured text are returned as text; PDFs through `pdftotext`; office and ebook formats through `pandoc` (or `soffice`); images come back as an embed plus any text `tesseract` reads from them (a missing tesseract is reported as OCR unavailable). Images and audio/video are copied into `<vault>/assets/` when `vault` is given (it must exist). The model decides what pages to write; this only converts input and copies media."
+  },
+  {
+    "type": "function",
+    "name": "wiki_write",
+    "parameters": {
+      "additionalProperties": false,
+      "description": "T25: create or replace a wiki page.",
+      "properties": {
+        "body": {
+          "description": "Page body (markdown, wikilinks welcome).",
+          "type": "string"
+        },
+        "kind": {
+          "description": "source, entity, concept or synthesis.",
+          "type": "string"
+        },
+        "overwrite": {
+          "description": "Replace an existing page.",
+          "type": "boolean"
+        },
+        "tags": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Tags."
+        },
+        "title": {
+          "description": "Page title.",
+          "type": "string"
+        },
+        "vault": {
+          "description": "Existing vault directory.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "body",
+        "kind",
+        "overwrite",
+        "tags",
+        "title",
+        "vault"
+      ],
+      "type": "object"
+    },
+    "strict": true,
+    "description": "Create or replace a structured wiki page with front matter.\n- `kind` selects the page family: `source`, `entity`, `concept` or `synthesis`; the page goes to `<vault>/<kind>s/<slug>.md`.\n- `vault` must name an existing vault directory; a blank or `.` vault is refused.\n- An existing page is protected unless `overwrite=true`; pass a fully merged body when replacing.\n- Tags, type and update date are normalized by the tool. Use wikilinks in `body` where knowledge should connect."
+  },
+  {
+    "type": "function",
+    "name": "wiki_finish_ingest",
+    "parameters": {
+      "additionalProperties": false,
+      "description": "T25: archive an ingested unit, log it and commit the vault.",
+      "properties": {
+        "note": {
+          "description": "What was added, or why the unit was skipped.",
+          "type": "string"
+        },
+        "source": {
+          "description": "The ingested file under `<vault>/raw/` to archive.",
+          "type": "string"
+        },
+        "vault": {
+          "description": "Existing vault directory.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "note",
+        "source",
+        "vault"
+      ],
+      "type": "object"
+    },
+    "strict": true,
+    "description": "Archive an ingested unit, append the log entry and commit the vault when possible.\n- `source` is the ingested file under `<vault>/raw/`; it moves to `<vault>/raw/archive/`. Archive runs first; if it fails, no log entry or commit is created.\n- The log entry (date, source, `note`) is appended to `<vault>/log.md`.\n- The commit runs only when the vault is the root of its own git work tree and there is a diff; a vault nested inside another repository is not committed. A failed commit is an error, with the archive and log left in place to retry."
   }
 ]

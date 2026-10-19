@@ -35,7 +35,6 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> AgentEx
     }
 
     /// Executes an agent tool call by creating a new chat request for the
-    /// Executes an agent tool call by creating a new chat request for the
     /// specified agent. If conversation_id is provided, the agent will reuse
     /// that conversation, maintaining context across invocations. Otherwise,
     /// a new conversation is created.
@@ -45,6 +44,37 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> AgentEx
         task: String,
         ctx: &ToolCallContext,
         conversation_id: Option<ConversationId>,
+    ) -> anyhow::Result<ToolOutput> {
+        self.execute_with(agent_id, task, ctx, conversation_id, None)
+            .await
+    }
+
+    /// Like [`AgentExecutor::execute`], one `task` level deeper than `ctx`
+    /// and optionally on another model. The future is boxed: a worker's own
+    /// tool calls re-enter the registry, so its type would otherwise be
+    /// infinitely recursive.
+    ///
+    /// # Arguments
+    /// * `model` - Model the worker runs on instead of the agent's own.
+    pub fn execute_with<'a>(
+        &'a self,
+        agent_id: AgentId,
+        task: String,
+        ctx: &'a ToolCallContext,
+        conversation_id: Option<ConversationId>,
+        model: Option<forge_domain::ModelId>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<ToolOutput>> + Send + 'a>>
+    {
+        Box::pin(self.run_worker(agent_id, task, ctx, conversation_id, model))
+    }
+
+    async fn run_worker(
+        &self,
+        agent_id: AgentId,
+        task: String,
+        ctx: &ToolCallContext,
+        conversation_id: Option<ConversationId>,
+        model: Option<forge_domain::ModelId>,
     ) -> anyhow::Result<ToolOutput> {
         ctx.send_tool_input(
             TitleFormat::debug(format!(
@@ -78,12 +108,10 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> AgentEx
         };
         // Execute the request through the ForgeApp
         let app = crate::ForgeApp::new(self.services.clone());
-        let mut response_stream = app
-            .chat(
-                agent_id.clone(),
-                ChatRequest::new(Event::new(task.clone()), conversation.id),
-            )
-            .await?;
+        let mut request = ChatRequest::new(Event::new(task.clone()), conversation.id);
+        request.task_depth = ctx.task_depth() + 1;
+        request.model_override = model;
+        let mut response_stream = app.chat(agent_id.clone(), request).await?;
 
         // Collect responses from the agent
         let mut output = String::new();

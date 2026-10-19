@@ -4,220 +4,134 @@ expression: "all_descriptions.join(\"\\n---\\n\\n\")"
 ---
 ### read
 
-Reads a file from the local filesystem. You can access any file directly by using this tool. Assume this tool is able to read all files on the machine. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.
-
-Usage:
-- The file_path parameter must be an absolute path, not a relative path
-- By default, it reads up to 2000 lines starting from the beginning of the file
-- You can optionally specify a line start_line and end_line (especially handy for long files), but it's recommended to read the whole file by not providing these parameters
-- Any lines longer than 2000 characters will be truncated
-- Results are returned using rg "" -n format, with line numbers starting at 1
-- Jupyter notebooks (.ipynb files) are read as plain JSON text - you can parse the cell structure, outputs, and embedded content directly from the JSON
-- This tool can only read files, not directories. To read a directory, use an ls command via the `shell` tool.
-- You can call multiple tools in a single response. It is always better to speculatively read multiple potentially useful files in parallel.
+Read one file: text, PDF, image, or notebook. Relative paths resolve against the working directory.
+- Text comes back as `12:content`: line number, a colon, then the text. Lines are returned whole, however long they are. The prefix is not file content; strip it when you quote text back into an edit. `show_line_numbers: false` returns the text without prefixes.
+- A read stops after 2000 lines and ends with a footer naming the exact `range` that continues it. Use `range` with `start_line`/`end_line` for a slice of the file.
+- A whole-file read (no `range`) of a file larger than 262144 bytes is refused with a suggested ranged call; ranged reads are not subject to that cap.
+- `range` also takes a byte range, `start_byte` (0-based) and optional `end_byte` (one past the last byte), for text with few or no line breaks: it returns raw text without line prefixes, one page at a time, snapped to UTF-8 character boundaries, and names the offset to continue from. Use it to page through a saved result file.
+- Pass either a line range or a byte range, never both.
+- Reading the same lines of an unchanged file again, while the earlier result is still in the conversation, returns a short note naming the read call that showed them.
+- A Jupyter notebook (.ipynb) read without a range comes back as its cells, each with its id, type, source and a summary of its outputs; a line or byte range reads its raw JSON.
+- A PDF comes back as extracted text (via `pdftotext`).
+- Directories, pipes and other special files are refused; use `fs_search` to find files.
+- Reading records which lines you have seen. An overwriting `write` requires a prior read of the file. `patch` requires a prior read and that every line it changes was shown.
+- You can call multiple tools in a single response; read several files in parallel when you need them.
 
 ---
 
 ### write
 
-Writes a file to the local filesystem.
-
-Usage:
-- This tool will overwrite the existing file if there is one at the provided path.
-- If this is an existing file, you MUST use the read tool first to read the file's contents and use this tool with 'overwrite' as true . This tool will fail if you did not read the file first or don't set overwrite parameter to true.
-- ALWAYS prefer patch on existing files in the codebase. NEVER write new files unless explicitly required.
-- NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.
-- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.
+Create a file, or replace one whole. Missing parent directories are created.
+- Replacing an existing file needs `overwrite=true` and a prior read of the file in this conversation (`read`); one page is enough, the whole file is not needed. Without `overwrite=true` an existing file is refused.
+- If the file changed on disk since that read, the overwrite is refused and nothing is written; the error names both hashes and shows the diff from what you read to what is there now, and a retry after it goes through.
+- The file keeps its existing line-ending style (LF, CRLF or CR); a new file gets LF.
+- The previous state is snapshotted first, so `undo` brings it back (undoing a create deletes the file).
+- After the write the file is parsed locally and syntax errors the write introduced are reported as a warning.
+- Edit existing files with `patch`; use this only for new files or a deliberate full rewrite.
+- Do not create documentation files unless asked.
 
 ---
 
 ### fs_search
 
-A powerful search tool built on ripgrep
+Search file contents by regex. `output_mode` is `files_with_matches` (paths, the default), `content` (matching lines as `path:line:text`, context lines as `path-line-text`, `--` between groups) or `count` (`path:N`).
+- The search uses ripgrep's libraries in-process. Paths ignored by `.gitignore`/`.ignore` are skipped, as are hidden paths unless `path` names one or `glob` names a dot-leading component such as `.github/**`; binary files are skipped.
+- `glob` filters paths (a leading `!` excludes); `file_type` takes ripgrep type names (`rust`, `py`, `js`, …) or a bare extension, and cannot be combined with a positive `glob`.
+- Regex syntax is ripgrep's: escape literal braces (`interface\{\}`); `multiline: true` lets a pattern span lines.
+- Results are absolute paths in path order. Bytes that are not valid UTF-8 are shown as `\xNN`.
+- The walk stays on the filesystem `path` is on and does not enter mount points below it; name a mounted share as `path` to search it. A search is bounded at 120 seconds.
+- `head_limit` and `offset` page through a large result; the result names the next `offset` when there are more. A result too large to show inline is written to a file whose path the result names.
+- Use `read` to see a file once a search has found it.
+- Use `task` for open-ended investigations that need several rounds of search and reading.
 
-Usage:
-- ALWAYS use `fs_search` for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The `fs_search` tool has been optimized for correct permissions and access.
-- Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")
-- Filter files with glob parameter (e.g., "*.js", "**/*.tsx") or type parameter (e.g., "js", "py", "rust")
-- Output modes: "content" shows matching lines, "files_with_matches" shows only file paths (default), "count" shows match counts
-- Use Task tool for open-ended searches requiring multiple rounds
-- Pattern syntax: Uses ripgrep (not grep) - literal braces need escaping (use `interface\\{\\}` to find `interface{}` in Go code)
-- Multiline matching: By default patterns match within single lines only. For cross-line patterns like `struct \\{[\\s\\S]*?field`, use `multiline: true`
 
 ---
 
-### sem_search
+### ast_search
 
-AI-powered semantic code search. YOUR DEFAULT TOOL for code discovery and exploration when searching within /home/user/project. Use this when you need to find code locations, understand implementations, discover patterns, or explore unfamiliar code - it works with natural language about behavior and concepts, not just keyword matching.
-
-**WHEN TO USE sem_search:**
-- Finding implementation of specific features or algorithms
-- Understanding how a system works across multiple files
-- Discovering architectural patterns and design approaches
-- Locating test examples or fixtures
-- Finding where specific technologies/libraries are used
-- Exploring unfamiliar codebases to learn structure
-- Finding documentation files (README, guides, API docs)
-
-**WHEN NOT TO USE (use fs_search instead):**
-- Searching for exact strings, TODOs, or specific function names
-- Finding all occurrences of a variable or identifier
-- Searching in specific file paths or with regex patterns
-- When you know the exact text to search for
-
-IMPORTANT: Only searches within /home/user/project and subdirectories. For paths outside this scope, use fs_search with path parameter.
-
-**TIPS FOR SUCCESS:**
-- Use 2-3 varied queries to capture different aspects (e.g., "OAuth token refresh", "JWT expiry handling", "authentication middleware")
-- Balance specificity (focused results) with generality (don't miss relevant code)
-- Avoid overly broad queries like "authentication" or "tools" - be specific about what aspect you need
-- Keep queries targeted - too many broad queries can cause timeouts
-- **Match your intent**: If seeking documentation, use doc-focused keywords ("setup guide", "configuration README"); if seeking code, use implementation terms ("token refresh logic", "error handling implementation")
-
-Returns the topK most relevant file:line locations with code context. Each query is ranked independently, then reranked by relevance to your stated intent.
+Search code structurally with ast-grep (in-process, tree-sitter grammars). Patterns match parsed syntax, so they span whitespace and line breaks and never match inside comments or strings. Use `fs_search` for plain text, regex and filenames.
+- In a pattern `$NAME` matches one syntax node and `$$$NAME` matches zero or more; metavariables are uppercase, and reusing one requires equal captures.
+- The language is inferred from each file's extension; set `language` to restrict the search to one language. Under `language="c"` a bare call pattern like `call($A)` matches nothing, because tree-sitter-c parses that fragment as a type; write it as an expression statement (`call($A);`).
+- Matches come back as an absolute `path:line` heading, the numbered source lines (`12|code`), and the metavariable captures. When more matches exist than `max_results` (default 200), the extra ones are dropped and the result says so.
+- The walk skips paths ignored by `.gitignore` and hidden paths.
+- Rewrites are two-step: `rewrite` alone is a dry run that shows a unified diff and changes nothing; `apply=true` writes it and is refused when there are more matches than `max_results`. An applied rewrite snapshots every changed file first, so `undo` brings each back.
 
 ---
 
 ### remove
 
-Request to remove a file at the specified path. Use when you need to delete an existing file. The path must be absolute. This operation can be undone using the `undo` tool.
+Move a file, directory or symlink to the trash, or delete it with `permanent=true`. Either way the path is snapshotted first, so `undo` can bring it back. Symlinks are removed as symlinks, never followed. The trash uses `trash` or `trash-put`; when neither is installed or the command fails, nothing is removed and `permanent=true` is the way to remove the path. Anything over 512 MiB is refused rather than trashed; confirm with the user before deleting that with `permanent=true`.
 
 ---
 
 ### patch
 
-Performs exact string replacements in files.
-Usage:
-- You must use your `read` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file. 
-- When editing text from `read` tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: 'line_number:'. Everything after that line_number: is the actual file content to match. Never include any part of the line number prefix in the old_string or new_string.
-- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
-- Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.
-- The edit will FAIL if `old_string` is not unique in the file. Either provide a larger string with more surrounding context to make it unique or use `replace_all` to change every instance of `old_string`. 
-- Use `replace_all` for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance.
+Replace exact text in one file.
+- Read the file with `read` before editing it; editing a file this conversation has not read is refused. The `12:` prefix in read output is not file content; only the text after it is.
+- `old_string` must match exactly once unless `replace_all` is set. When it is not in the file exactly, it is matched again with smart quotes, Unicode dashes, no-break spaces and trailing whitespace read as plain ASCII; the file keeps its own characters wherever your edit left `old_string` unchanged. With `replace_all`, this fallback runs only when there is no exact occurrence. A miss reports the closest line in the file.
+- Pass `edits` (a list of `{old_string, new_string, replace_all}`) for several replacements in one call: they apply in order, each seeing the previous result, and all are validated before anything is written, so a failed call leaves the file untouched and names the offending edit. Never combine `edits` with the scalar `old_string`/`new_string`/`replace_all` form.
+- Line endings in `old_string`/`new_string` are matched and written in the file's own style (LF or CRLF).
+- After the write, the file is parsed locally and any syntax errors the edit introduced are reported as a warning.
+- One call is one `undo` step.
+- Use `write` for new files or a deliberate full rewrite.
 
----
-
-### multi_patch
-
-This is a tool for making multiple edits to a single file in one operation. It is built on top of the patch tool and allows you to perform multiple find-and-replace operations efficiently. Prefer this tool over the patch tool when you need to make multiple edits to the same file.
-
-Before using this tool:
-
-1. Use the Read tool to understand the file's contents and context
-2. Verify the directory path is correct
-
-To make multiple file edits, provide the following:
-1. file_path: The absolute path to the file to modify (must be absolute, not relative)
-2. edits: An array of edit operations to perform, where each edit contains:
-   - oldString: The text to replace (must match the file contents exactly, including all whitespace and indentation)
-   - newString: The edited text to replace the oldString
-   - replaceAll: Replace all occurrences of oldString. This parameter is optional and defaults to false.
-
-IMPORTANT:
-- All edits are applied in sequence, in the order they are provided
-- Each edit operates on the result of the previous edit
-- All edits must be valid for the operation to succeed - if any edit fails, none will be applied
-- This tool is ideal when you need to make several changes to different parts of the same file
-
-CRITICAL REQUIREMENTS:
-1. All edits follow the same requirements as the single Edit tool
-2. The edits are atomic - either all succeed or none are applied
-3. Plan your edits carefully to avoid conflicts between sequential operations
-
-WARNING:
-- The tool will fail if edits.oldString doesn't match the file contents exactly (including whitespace)
-- The tool will fail if edits.oldString and edits.newString are the same
-- Since edits are applied in sequence, ensure that earlier edits don't affect the text that later edits are trying to find
-
-When making edits:
-- Ensure all edits result in idiomatic, correct code
-- Do not leave the code in a broken state
-- Always use absolute file paths (starting with /)
-- Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.
-- Use replaceAll for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance.
-
-If you want to create a new file, use:
-- A new file path, including dir name if needed
-- First edit: empty oldString and the new file's contents as newString
-- Subsequent edits: normal edit operations on the created content
 
 ---
 
 ### undo
 
-Reverts the most recent file operation (create/modify/delete) on a specific file. Use this tool when you need to recover from incorrect file changes or if a revert is requested by the user.
+Restore one path to its latest snapshot. Every tool that changes a file snapshots it first; one `patch` call, even with several edits, is one snapshot.
+- Restores file contents and permission modes, symlink targets, whole directory trees, and absence: undoing the creation of a file deletes it. Ownership, timestamps and extended attributes are not restored.
+- Each successful restore pops one snapshot, so repeated calls walk further back. A filesystem error keeps the snapshot for a retry. An unusable snapshot is discarded with an error without changing the path; call again to reach an older entry.
+- Snapshots belong to this conversation and survive a restart of it; the store keeps the newest 100 entries (64 MiB). This is not git and does not touch repository history.
 
 ---
 
 ### shell
 
-Executes shell commands. The `cwd` parameter sets the working directory for command execution. If not specified, defaults to `/home/user/project`.
+Run one command with `/bin/bash` and return its exit code, stdout and stderr. Under bash and zsh a pipeline fails when any stage fails (`pipefail`), so `false | cat` reports exit 1. The working directory is `cwd`, default `/home/user/project`; set `cwd` instead of using `cd`.
 
-CRITICAL: Do NOT use `cd` commands in the command string. This is FORBIDDEN. Always use the `cwd` parameter to set the working directory instead. Any use of `cd` in the command is redundant, incorrect, and violates the tool contract.
+Long output comes back as its head and its tail, with a marker between them naming the bytes left out and the file that holds the whole stream:
 
-IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.
+    [truncated: output budget (… bytes) reached; stdout bytes 25000-980000 of 1004000 (955000 bytes) are not shown; the whole stdout is at /path/shell-3-….log — read it on with range {"start_byte": 25000}]
 
-Before executing the command, please follow these steps:
+Read any part of that file with `read` and a byte range, so do not pipe through `head` or `tail` just to shrink the output. Stdin is `/dev/null` and there is no terminal: a command that reads input gets end-of-file, and a password or confirmation prompt gets no answer.
 
-1. Directory Verification:
-   - If the command will create new directories or files, first use `shell` with `ls` to verify the parent directory exists and is the correct location
-   - For example, before running "mkdir foo/bar", first use `ls foo` to check that "foo" exists and is the intended parent directory
+A command does not have to finish before you get an answer. The call waits `timeout` seconds (default 30); a command that finishes inside that window comes back whole, and one still running comes back as a handle with whatever it has printed so far:
 
-2. Command Execution:
-   - Always quote file paths that contain spaces with double quotes (e.g., python "path with spaces/script.py")
-   - Examples of proper quoting:
-     - mkdir "/Users/name/My Documents" (correct)
-     - mkdir /Users/name/My Documents (incorrect - will fail)
-     - python "/path/with spaces/script.py" (correct)
-     - python /path/with spaces/script.py (incorrect - will fail)
-   - After ensuring proper quoting, execute the command.
-   - Capture the output of the command.
+    command still running after 30s (handle 3, pid 4242). ...
+    HANDLE 3 RUNNING
 
-Usage notes:
-  - The command argument is required.
-  - It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
-  - If the output exceeds 200 prefix lines or 200 suffix lines, or if a line exceeds 2000 characters, it will be truncated and the full output will be written to a temporary file. You can use read with start_line/end_line to read specific sections or fs_search to search the full content. Because of this, you should NOT use `head`, `tail`, or other truncation commands to limit output - just run the command directly.
-  - Do not use shell with the `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands, unless explicitly instructed or when these commands are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands:
-    - File search: Use `fs_search` (NOT find or ls)
-    - Content search: Use `fs_search` with regex (NOT grep or rg)
-    - Read files: Use `read` (NOT cat/head/tail)
-    - Edit files: Use `patch`(NOT sed/awk)
-    - Write files: Use `write` (NOT echo >/cat <<EOF)
-    - Communication: Output text directly (NOT echo/printf)
-  - When issuing multiple commands:
-    - If the commands are independent and can run in parallel, make multiple `shell` tool calls in a single message. For example, if you need to run "git status" and "git diff", send a single message with two `shell` tool calls in parallel.
-    - If the commands depend on each other and must run sequentially, use a single `shell` call with '&&' to chain them together (e.g., `git add . && git commit -m "message" && git push`). For instance, if one operation must complete before another starts (like mkdir before cp, write before shell for git operations, or git add before git commit), run these operations sequentially instead.
-    - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail
-    - DO NOT use newlines to separate commands (newlines are ok in quoted strings)
-  - DO NOT use `cd <directory> && <command>`. Use the `cwd` parameter to change directories instead.
+The command is never killed by the wait. Then `action="poll", handle="3"` returns new output and whether it is still running, `action="wait", handle="3", timeout=N` blocks up to N more seconds, and `action="kill", handle="3"` stops it (SIGTERM, then SIGKILL, to its whole process group). `handle` defaults to the most recent running job. Do a poll before assuming a long build or test run has failed. Interrupting the turn kills a command the call is still waiting on.
 
-Good examples:
-  - With explicit cwd: cwd="/foo/bar" with command: pytest tests
+The command gets a filtered environment: the configured allow-list (by default PATH, HOME, USER, LANG, LC_ALL, TERM, PWD, SHELL) plus the names you list in `env`. When the command references a variable that was filtered out, the result says so.
 
-Bad example:
-  cd /foo/bar && pytest tests
+- Independent commands can go in parallel calls in one response; chain dependent ones with `&&` in one call.
+- Search with `fs_search`, not `grep`, `rg`, or `find`.
+- Read files with `read`, not `cat`, `head`, or `tail`.
+- Edit files with `patch`, not `sed` or `awk`.
+- Write files with `write`, not redirects or heredocs.
+- Delete with `remove`, not `rm`.
 
-Returns complete output including stdout, stderr, and exit code for diagnostic purposes.
 
 ---
 
 ### fetch
 
-Retrieves content from URLs as markdown or raw text. Enables access to current online information including websites, APIs and documentation. Use for obtaining up-to-date information beyond training data, verifying facts, or retrieving specific online content. Handles HTTP/HTTPS and converts HTML to readable markdown by default. Cannot access private/restricted resources requiring authentication. Respects robots.txt and may be blocked by anti-scraping measures. For large pages, returns the first 40,000 characters and stores the complete content in a temporary file for subsequent access.
+Fetch a URL over HTTP(S) or `file://`.
 
-IMPORTANT: This tool only handles text-based content (HTML, JSON, XML, plain text, etc.). It will reject binary file downloads (.tar.gz, .zip, .bin, .deb, images, audio, video, etc.) with an error. To download binary files, use the `shell` tool with `curl -fLo <output_file> <url>` instead.
-
----
-
-### followup
-
-Use this tool when you encounter ambiguities, need clarification, or require more details to proceed effectively. Use this tool judiciously to maintain a balance between gathering necessary information and avoiding excessive back-and-forth.
+HTML comes back as markdown with links made absolute, so you can fetch them as-is; `raw=true` returns the source instead. `method`, `headers`, `body` and `json_body` make any HTTP request (a GET that saves nothing checks robots.txt first). `save` streams the body to that path instead of returning it, with no size limit; a partial download left by an interrupted save resumes with a Range request, and the previous file at that path is snapshotted first (`undo` brings it back). Binary responses come back as a short descriptor naming the type and size; pass `save` to get the bytes. Images come back as images when the model accepts image input. Unsaved responses are read up to 32 MiB and bounded by a 30-second timeout; a large text result is written to a file whose path and continuation range the result names.
 
 ---
 
 ### plan
 
-Creates a new plan file with the specified name, version, and content. Use this tool to create structured project plans, task breakdowns, or implementation strategies that can be tracked and referenced throughout development sessions.
+Write a markdown plan to `plans/{date}-{plan_name}-{version}.md` under the working directory (or the configured plans directory).
+- Use it for durable implementation plans, task breakdowns, investigation notes or strategy documents that should outlive this turn, or when the user asks for a plan to be written down. Do not create documentation proactively.
+- `plan_name` and `version` are sanitised into the filename: anything other than letters, digits, `-`, `_` and `.` becomes `-`.
+- `content` is written verbatim.
+- An existing plan with the same date, name and version is left unchanged unless `overwrite=true`; an overwrite reports that it replaced the plan, and the previous contents are snapshotted so `undo` brings them back.
+- This is for plans, not source-code edits.
 
 ---
 
@@ -444,70 +358,226 @@ Returns all current todos with their IDs, content, and status (`pending`, `in_pr
 
 ### task
 
-Launch a new agent to handle complex, multi-step tasks autonomously. 
+Launch one or more worker agents for complex, multi-step work. Each worker runs autonomously in its own conversation and returns one result to you; the result is not shown to the user, so summarize it in your reply.
 
-The task tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
-
-Available agent types and the tools they have access to:
+Available agents and their tools:
 - **debug**: Specialized in debugging issues
-  - Tools: read, shell, fs_search, sem_search, fetch
+  - Tools: read, shell, fs_search, fetch
 - **sage**: Specialized in researching codebases
-  - Tools: read, fs_search, sem_search, fetch
+  - Tools: read, fs_search, fetch
 
-When using the task tool, you must specify a agent_id parameter to select which agent type to use.
+When to use: open-ended searches that need several search/read rounds, independent investigations that can run concurrently, work that suits another agent's persona and tools.
+When not to use: anything one or two direct tool calls finish, such as reading one known file or two or three files (use `read`), or searching for an exact identifier or definition (use `fs_search`).
 
-When NOT to use the task tool:
-- If you want to read a specific file path, use the read or fs_search tool instead of the task tool, to find the match more quickly
-- If you are searching for a specific class definition like "class Foo", use the fs_search tool instead, to find the match more quickly
-- If you are searching for code within a specific file or set of 2-3 files, use the read tool instead of the task tool, to find the match more quickly
-- Other tasks that are not related to the agent descriptions above
+Inputs:
+- `tasks` (required to start workers): one self-contained prompt per worker. A fresh worker cannot see this conversation; include paths, error text, constraints, the expected output shape, and whether it may change code.
+- `agent_id` (required to start workers): the agent the workers run as. An unknown agent is an error and no worker starts.
+- `session_id`: resume a worker session (the id is named in an earlier result as `session_id=…`). It runs exactly one task; an unknown id is an error.
+- `model`: run the workers on another model. Leave it unset unless the user asks for it.
+
+Parallelism: the tasks of one call run concurrently through a bounded worker pool, and several `task` calls in one response also run concurrently. One task returns the worker's reply verbatim; several come back numbered under a `TASK_RESULTS` header in task order. A worker that fails reports its error in its own slot without discarding the others. Each reply is held to an equal share of the result budget. Workers that start their own tasks run one level deeper; past the configured depth limit a call is refused.
+
+Background: a call blocks until every worker finishes. With `background=true` it returns at once with a handle while the workers keep running:
+
+    task running in the background (handle t1): ...
+    HANDLE t1 RUNNING
+
+`action="poll", handle="t1"` says whether it is still running and returns the result once done; `action="wait", handle="t1", timeout=N` blocks up to N seconds, or until the end without `timeout`; `action="kill", handle="t1"` stops it. `handle` defaults to your most recent running task, and you see only tasks this conversation started. The finished result is also written to the file the handle names, and if you have not polled it by your next turn, a reminder names that file. Use background runs for slow, independent work you do not need before your next step.
+
+---
+
+### tool_discovery
+
+Search the catalog of tools and skills this agent may load but does not have yet, or load one by its id.
+- An empty `query` returns a compact index (ids, names, sources; capped at 4 KiB). A search ranks rows by BM25 over names, descriptions and parameter names and adds short descriptions (capped at 8 KiB). `kind` (native, mcp, skill) and `source` (an MCP server's name, `native`, `skill`, or `mcp` for every server) narrow the rows. When `truncated` is true, repeat the call with `offset` set to `next_offset`.
+- `load` takes the `id` of a row whose `loadable` is true, or a tool's bare name. Loading a tool publishes its full schema from the next model call on, for the rest of this conversation. Loading a skill returns its instructions and loads the tools it declares that this agent may use. Searching with `kind="mcp"`, `source="mcp"` or an MCP server's name as `source` connects to those servers first; a server that is not connected yet or failed to connect appears as a status row, which is not loadable.
+- Load first, then call the tool in a later response: a tool is not callable in the same response that loads it. Calling a tool that is not loaded returns an error naming the exact load call.
+
+---
+
+### mcp_resource_list
+
+List the resources of an MCP server. Before using it, run tool_discovery with kind="mcp" (or an MCP server name as source) to connect the servers, then pass the exact server name of an mcp status row. Configured secrets are redacted from the result.
+
+---
+
+### mcp_resource_templates
+
+List the resource templates of an MCP server. Before using it, run tool_discovery with kind="mcp" (or an MCP server name as source) to connect the servers, then pass the exact server name of an mcp status row. Configured secrets are redacted from the result.
+
+---
+
+### mcp_resource_read
+
+Read an MCP resource by URI. Before using it, run tool_discovery with kind="mcp" (or an MCP server name as source) to connect the servers, then pass the exact server name of an mcp status row. Copy an exact URI from mcp_resource_list or mcp_resource_templates. Configured secrets are redacted from the result.
+
+---
+
+### mcp_resource_subscribe
+
+Subscribe to update notifications for an MCP resource. Before using it, run tool_discovery with kind="mcp" (or an MCP server name as source) to connect the servers, then pass the exact server name of an mcp status row. Copy an exact URI from mcp_resource_list. Configured secrets are redacted from the result.
+
+---
+
+### mcp_resource_unsubscribe
+
+Stop update notifications for an MCP resource. Before using it, run tool_discovery with kind="mcp" (or an MCP server name as source) to connect the servers, then pass the exact server name of an mcp status row. Copy an exact URI from mcp_resource_list. Configured secrets are redacted from the result.
+
+---
+
+### mcp_prompt_list
+
+List the prompts of an MCP server. Before using it, run tool_discovery with kind="mcp" (or an MCP server name as source) to connect the servers, then pass the exact server name of an mcp status row. Configured secrets are redacted from the result.
+
+---
+
+### mcp_prompt_get
+
+Get an MCP prompt and its messages. Before using it, run tool_discovery with kind="mcp" (or an MCP server name as source) to connect the servers, then pass the exact server name of an mcp status row. Copy an exact prompt name from mcp_prompt_list. Configured secrets are redacted from the result.
+
+---
+
+### terminal_session
+
+Drive an interactive program through a persistent terminal (PTY): TUIs, REPLs, pagers, editors, installers and prompts. Sessions persist across calls for this conversation; a running process is normal, and stop sessions when you are done. `shell` is for ordinary non-interactive commands.
+- `action`: `start` (needs `command`; `cols`/`rows` only here, default 120x40), `send` (`keys`), `look`, `stop`, `list`.
+- `keys` is comma-separated: named keys are `enter`, `tab`, `esc`, the arrows (`up`, `down`, `left`, `right`), `home`, `end`, `pgup`, `pgdn`, `backspace`, `delete`, `ctrl-c`, `ctrl-d`, `ctrl-l`, `ctrl-x`, `ctrl-z` and `f1` to `f12`; anything else is typed verbatim, and `comma` types a comma.
+- Each result has the rendered screen lines, cursor position and process state (`still_running`, `exit_status`). `lines_changed` and `screen_responded` compare against the previous observation: after `send`, change during the wait window after the keys (not proof the keys caused it); after `look`, passive change since last time.
+- `terminal_snapshot` renders the screen as a PNG when text cannot show spacing, colour, borders or clipping, and also resets that comparison baseline.
+- Under a jail (`-C DIR`) the command runs in the same jail as the shell tool.
+
+---
+
+### terminal_snapshot
+
+Render the current screen of a terminal session as a PNG, for judging layout, borders, colours, cursor placement, wrapping or clipping that text cannot show. The session must already be started. The result is the image when the model accepts images, and always names the file it was written to.
+
+---
+
+### lsp
+
+Ask a language server about a source file: `diagnostics` (errors and warnings in the file), `definition`, `references` or `hover` (type and docs) at a position. The server is picked by extension from what is on PATH: rust-analyzer for Rust, basedpyright or pyright for Python, gopls for Go, typescript-language-server for TypeScript and JavaScript, clangd for C and C++. A file no installed server covers returns an error naming what was looked for.
+- Each call sends the file as it is on disk now, so call `diagnostics` after an edit to check it. The first call for a project starts the server and can take a while; later calls reuse it. A server still indexing may return nothing; call again.
+- A position is `line` and `character`, both 1-based.
+- Locations come back as `path:line:column: source line`, relative to the working directory when under it.
+
+---
+
+### kernel
+
+Execute Python in a persistent IPython kernel (Jupyter). State survives between calls: functions, imports, open connections and loaded data defined in one call are there in the next.
+- `action`: `run` (default) submits `code`; `poll` returns what a running cell produced since the last read; `wait` blocks for it up to `timeout`; `interrupt` stops the cell (the namespace survives); `restart` replaces the kernel (destroys every definition); `kill` shuts it down.
+- `timeout` (default 120 seconds) is the longest one call blocks. A cell that finishes inside it comes back whole; one still running comes back as a handle, `HANDLE <n> RUNNING`, and a new `code` is refused while it runs.
+- stdout, stderr, results and tracebacks come back; images are written to files and reported as `IMAGE <path>`. A finished cell ends with a `NAMESPACE` line listing the functions and classes defined so far.
+- Cells can call tools: the namespace holds `tools`, and `tools.<name>(...)` runs the tool `<name>` with keyword arguments and returns its result text. Each call goes through the same checks as a direct call (allowed tools, argument validation, bans, read-before-edit); a refusal raises `tools.ToolError`. `tools.names()` lists the callable tools; `kernel` and `toolbox` are not callable from a cell.
+- `toolbox` saves functions defined here to disk and loads them into later sessions.
+- Use `shell` for builds, tests, git and anything that is a command rather than Python.
 
 
-Usage notes:
-- Always include a short description (3-5 words) summarizing what the agent will do
-- Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses
-- When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.
-- Agents can be resumed using the \`session_id\` parameter by passing the agent ID from a previous invocation. When resumed, the agent continues with its full previous context preserved. When NOT resuming, each invocation starts fresh and you should provide a detailed task description with all necessary context.
-- When the agent is done, it will return a single message back to you along with its agent ID. You can use this ID to resume the agent later if needed for follow-up work.
-- Provide clear, detailed prompts so the agent can work autonomously and return exactly the information you need.
-- Agents with "access to current context" can see the full conversation history before the tool call. When using these agents, you can write concise prompts that reference earlier context (e.g., "investigate the error discussed above") instead of repeating information. The agent will receive all prior messages and understand the context.
-- The agent's outputs should generally be trusted
-- Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
-- If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
-- If the user specifies that they want you to run agents "in parallel", you MUST send a single message with multiple task tool use content blocks. For example, if you need to launch both a build-validator agent and a test-runner agent in parallel, send a single message with both tool calls.
+---
 
-Example usage:
+### toolbox
 
-<example_agent_descriptions>
-"test-runner": use this agent after you are done writing code to run tests
-"greeting-responder": use this agent when to respond to user greetings with a friendly joke
-</example_agent_description>
+Functions that outlive the session: save a function to disk, load saved functions into the kernel, keep every revision with its provenance.
+- `action`: `list` (default; every saved function with its latest revision and scope), `show` (source of the latest or a given `revision`), `save` (`name` plus `source`: one top-level `def name(...)`; `note` says what changed), `load` (execs every saved function, or just `name`, into the kernel), `history` (every revision of `name` with date, session and note), `delete` (removes `name`; its revisions stay in the history file).
+- `scope`: `global` (default, every project) or `project` (`.forge/toolbox/` in the working directory; shadows a global function of the same name).
+- `save` never overwrites: each save is a new revision (`r1`, `r2`, …). It refuses a function that reads a free name the source does not define or import (a session variable, an unsaved helper); the error names every one. Imports used by the function go inside its body or above it in `source`.
+- Until `load` has run, the `kernel` namespace has none of the saved functions.
 
-<example>
-user: "Please write a function that checks if a number is prime"
-assistant: Sure let me write a function that checks if a number is prime
-assistant: First let me use the write tool to write a function that checks if a number is prime
-assistant: I'm going to use the write tool to write the following code:
-<code>
-function isPrime(n) {
-  if (n <= 1) return false
-  for (let i = 2; i * i <= n; i++) {
-    if (n % i === 0) return false
-  }
-  return true
-}
-</code>
-<commentary>
-Since a significant piece of code was written and the task was completed, now use the test-runner agent to run the tests
-</commentary>
-assistant: Now let me use the test-runner agent to run the tests
-assistant: Uses the task tool to launch the test-runner agent
-</example>
 
-<example>
-user: "Hello"
-<commentary>
-Since the user is greeting, use the greeting-responder agent to respond with a friendly joke
-</commentary>
-assistant: "I'm going to use the task tool to launch the greeting-responder agent"
-</example>
+---
+
+### browse
+
+Read a web page the way a browser sees it, JavaScript included, through obscura (a self-contained browser engine). Pages that build themselves in JavaScript come back rendered; rendered dumps use a five-second settle window.
+- `dump` (default `markdown`): `markdown` (links made absolute against the page URL), `text`, `html` (the DOM after scripts ran), `links` (URL, tab, anchor text per line), `original` (the raw response body as text), `assets` (one JSON object per sub-resource), `cookies` (the cookie jar as JSON).
+- `screenshot`: a path to save a PNG of the settled page; the result is then only the `SCREENSHOT path=… size=…` line, so call again without it to read the page.
+- A status of 400 or above leads the result with `ERROR: HTTP <code> from <url>` followed by the page.
+- Private, loopback and link-local IP literals are allowed. No POST, headers or body.
+- Use `fetch` for API calls that need a method, headers or a body.
+- obscura comes from forge's managed binaries (`forge tools --install`) or, failing that, PATH.
+
+---
+
+### browser_probe
+
+Render and screenshot a page or local HTML file in real headless Chromium (Playwright; WebGL through SwiftShader, no GPU needed) and measure whether an interaction changes it.
+- `click` is a `>`-separated chain of case-insensitive regexes matched against visible button or link text (e.g. `menu>settings`); `press` is a comma-separated list of keys pressed after the clicks.
+- The result lists the PNG frames (after load, after the actions, and `hold_ms` later) with per-frame metrics: size, dominant-colour share, unique colours, changed pixels against the previous frame, WebGL availability, console and page errors. Metrics describe the frames; they do not judge them.
+- Needs `python3` with the `playwright` package and its Chromium; a missing one is reported as an error.
+- `read` a returned PNG to look at the frame.
+
+
+---
+
+### serper_search
+
+Google search via Serper (needs `SERPER_API_KEY`). Keyword queries: exact phrases, names, error messages, recent news. Returns Google's organic results as title, URL and snippet, with the answer box first when there is one.
+`tavily_search` returns extracted page text and a synthesized answer instead of snippets.
+`exa_search` finds things you can describe but not name.
+`docs_search` is for library documentation.
+
+
+---
+
+### tavily_search
+
+Web search via Tavily (needs `TAVILY_API_KEY`). Each result carries extracted page text, usually with a one-paragraph synthesized answer first, so research and "how do I" questions get read without fetching each page.
+`serper_search` is for exact phrases and the freshest news.
+`exa_search` finds things you can describe but not name.
+`docs_search` is for library documentation.
+
+
+---
+
+### exa_search
+
+Semantic web search via Exa (needs `EXA_API_KEY`): describe what you want in a full sentence and it finds pages by meaning, each with a slice of page text. Best when you know what you mean but not what it is called.
+`serper_search` is for exact strings, names and error messages.
+`tavily_search` is for research questions that want a synthesized answer.
+`docs_search` is for library documentation.
+
+
+---
+
+### docs_search
+
+Version-current library documentation via Context7 (`CONTEXT7_API_KEY` optional). Use it before writing code against a third-party library, framework, SDK or API. It resolves `library` to Context7's best match and returns documentation snippets with source URLs. Context7 matches keywords, so a hit is reported only when the requested name (case and separators ignored) is the hit's project name (an id path segment or its title) or one whole word of it; anything else comes back as no match rather than an unrelated project's docs. Set `topic`; an untargeted dump is long.
+`serper_search` is for issues, changelogs and discussion around a library.
+
+
+---
+
+### notebook_edit
+
+Change one cell of a Jupyter notebook (.ipynb): `replace` its source (the default), `insert` a new cell after it, or `delete` it. Read the notebook first; `read` shows each cell's id as `[cell N id=ID type]`. A notebook changed on disk since the read is refused; read it again.
+- `cell_id` is the cell's id, or `index:N` (0-based) for notebooks without ids. `insert` with no `cell_id` inserts at the top and needs `cell_type` (`code` or `markdown`).
+- `new_source` is the cell's whole new source. A replaced code cell loses its outputs and execution count.
+- The notebook keeps its JSON layout (one-space indent, trailing newline).
+- The notebook is snapshotted first, so `undo` restores it.
+
+
+---
+
+### wiki_convert
+
+Convert one file for a wiki vault: text, code and structured text are returned as text; PDFs through `pdftotext`; office and ebook formats through `pandoc` (or `soffice`); images come back as an embed plus any text `tesseract` reads from them (a missing tesseract is reported as OCR unavailable). Images and audio/video are copied into `<vault>/assets/` when `vault` is given (it must exist). The model decides what pages to write; this only converts input and copies media.
+
+---
+
+### wiki_write
+
+Create or replace a structured wiki page with front matter.
+- `kind` selects the page family: `source`, `entity`, `concept` or `synthesis`; the page goes to `<vault>/<kind>s/<slug>.md`.
+- `vault` must name an existing vault directory; a blank or `.` vault is refused.
+- An existing page is protected unless `overwrite=true`; pass a fully merged body when replacing.
+- Tags, type and update date are normalized by the tool. Use wikilinks in `body` where knowledge should connect.
+
+---
+
+### wiki_finish_ingest
+
+Archive an ingested unit, append the log entry and commit the vault when possible.
+- `source` is the ingested file under `<vault>/raw/`; it moves to `<vault>/raw/archive/`. Archive runs first; if it fails, no log entry or commit is created.
+- The log entry (date, source, `note`) is appended to `<vault>/log.md`.
+- The commit runs only when the vault is the root of its own git work tree and there is a diff; a vault nested inside another repository is not committed. A failed commit is an error, with the archive and log left in place to retry.

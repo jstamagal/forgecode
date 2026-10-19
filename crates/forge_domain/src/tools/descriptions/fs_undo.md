@@ -1,1 +1,4 @@
-Reverts the most recent file operation (create/modify/delete) on a specific file. Use this tool when you need to recover from incorrect file changes or if a revert is requested by the user.
+Restore one path to its latest snapshot. Every tool that changes a file snapshots it first{{#if tool_names.patch}}; one `{{tool_names.patch}}` call, even with several edits, is one snapshot{{/if}}.
+- Restores file contents and permission modes, symlink targets, whole directory trees, and absence: undoing the creation of a file deletes it. Ownership, timestamps and extended attributes are not restored.
+- Each successful restore pops one snapshot, so repeated calls walk further back. A filesystem error keeps the snapshot for a retry. An unusable snapshot is discarded with an error without changing the path; call again to reach an older entry.
+- Snapshots belong to this conversation and survive a restart of it; the store keeps the newest 100 entries (64 MiB). This is not git and does not touch repository history.

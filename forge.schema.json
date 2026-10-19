@@ -71,6 +71,13 @@
         "null"
       ]
     },
+    "hooks": {
+      "description": "X19: user hooks run on tool calls, tool results and turn boundaries.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/UserHook"
+      }
+    },
     "http": {
       "description": "HTTP client settings including proxy, TLS, and timeout configuration.",
       "anyOf": [
@@ -81,6 +88,32 @@
           "type": "null"
         }
       ]
+    },
+    "jail": {
+      "description": "X20: the jail directory (`--jail DIR`). When set, tool-spawned\nprocesses run under `bwrap` with DIR read-write and the system\nread-only, and file tools refuse paths outside DIR and `jail_bind`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "jail_bind": {
+      "description": "X20: extra paths visible in the jail: `path` (read-only), `path:ro` or\n`path:rw`; `~` expands to the home directory.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "lock_subagent_model": {
+      "description": "When true, the `task` tool refuses a `model` override; workers always\nrun on their agent's configured model.",
+      "type": "boolean",
+      "default": false
+    },
+    "max_bash_output_bytes": {
+      "description": "Shell output shown per call, stdout and stderr together; past it the\nhead and tail are shown and the whole stream is written to a file.",
+      "type": "integer",
+      "format": "uint64",
+      "default": 0,
+      "minimum": 0
     },
     "max_commit_count": {
       "description": "Maximum number of recent commits included as context for commit message\ngeneration.",
@@ -98,13 +131,6 @@
     },
     "max_extensions": {
       "description": "Maximum number of file extensions included in the agent system prompt.",
-      "type": "integer",
-      "format": "uint",
-      "default": 0,
-      "minimum": 0
-    },
-    "max_fetch_chars": {
-      "description": "Maximum number of characters returned from a URL fetch.",
       "type": "integer",
       "format": "uint",
       "default": 0,
@@ -131,17 +157,17 @@
       "default": 0,
       "minimum": 0
     },
-    "max_line_chars": {
-      "description": "Maximum number of characters per line when reading a file.",
+    "max_parallel_file_reads": {
+      "description": "Maximum number of files read concurrently during batch operations.",
       "type": "integer",
       "format": "uint",
       "default": 0,
       "minimum": 0
     },
-    "max_parallel_file_reads": {
-      "description": "Maximum number of files read concurrently during batch operations.",
+    "max_read_bytes": {
+      "description": "Largest file, in bytes, a whole-file read (no range) returns; larger\nfiles must be read by line or byte range.",
       "type": "integer",
-      "format": "uint",
+      "format": "uint64",
       "default": 0,
       "minimum": 0
     },
@@ -159,48 +185,6 @@
         "null"
       ],
       "format": "uint",
-      "minimum": 0
-    },
-    "max_search_lines": {
-      "description": "Maximum number of lines returned by a single file search operation.",
-      "type": "integer",
-      "format": "uint",
-      "default": 0,
-      "minimum": 0
-    },
-    "max_search_result_bytes": {
-      "description": "Maximum number of bytes returned by a single file search operation.",
-      "type": "integer",
-      "format": "uint",
-      "default": 0,
-      "minimum": 0
-    },
-    "max_sem_search_results": {
-      "description": "Maximum number of candidate results returned from the initial semantic\nsearch vector query.",
-      "type": "integer",
-      "format": "uint",
-      "default": 0,
-      "minimum": 0
-    },
-    "max_stdout_line_chars": {
-      "description": "Maximum number of characters per line in shell command output.",
-      "type": "integer",
-      "format": "uint",
-      "default": 0,
-      "minimum": 0
-    },
-    "max_stdout_prefix_lines": {
-      "description": "Maximum number of lines captured from the leading portion of shell\ncommand output.",
-      "type": "integer",
-      "format": "uint",
-      "default": 0,
-      "minimum": 0
-    },
-    "max_stdout_suffix_lines": {
-      "description": "Maximum number of lines captured from the trailing portion of shell\ncommand output.",
-      "type": "integer",
-      "format": "uint",
-      "default": 0,
       "minimum": 0
     },
     "max_tokens": {
@@ -221,6 +205,25 @@
       "format": "uint",
       "minimum": 0
     },
+    "max_tool_result_bytes": {
+      "description": "Hard cap, in bytes, on any single tool result.",
+      "type": "integer",
+      "format": "uint64",
+      "default": 0,
+      "minimum": 0
+    },
+    "max_tool_result_inline_bytes": {
+      "description": "Tool results larger than this many bytes are spilled to a file and\nreplaced by a preview; also sizes one page of a byte-range read.",
+      "type": "integer",
+      "format": "uint64",
+      "default": 0,
+      "minimum": 0
+    },
+    "mcp": {
+      "description": "MCP settings (per-agent server/tool policy).",
+      "$ref": "#/$defs/McpSettings",
+      "default": {}
+    },
     "merge_system_messages": {
       "description": "When `true`, all system messages in the conversation are merged into a\nsingle leading system message before the request is sent. Enable this\nfor providers that reject requests containing system messages after\nuser or assistant turns (e.g. vLLM, NVIDIA NIM).",
       "type": "boolean",
@@ -232,6 +235,13 @@
       "format": "uint64",
       "default": 0,
       "minimum": 0
+    },
+    "plans_dir": {
+      "description": "Directory the `plan` tool writes to; relative paths resolve against\nthe working directory. Unset means `{cwd}/plans`.",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "providers": {
       "description": "Additional provider definitions merged with the built-in provider list.\n\nEntries with an `id` matching a built-in provider override its fields;\nentries with a new `id` are appended and become available for model\nselection.",
@@ -272,15 +282,8 @@
         }
       ]
     },
-    "sem_search_top_k": {
-      "description": "Number of top results retained after re-ranking in semantic search.",
-      "type": "integer",
-      "format": "uint",
-      "default": 0,
-      "minimum": 0
-    },
     "services_url": {
-      "description": "Base URL of the Forge services API used for semantic search and\nindexing.",
+      "description": "Base URL of the Forge services API used for workspace indexing.",
       "type": "string",
       "default": ""
     },
@@ -294,6 +297,23 @@
           "type": "null"
         }
       ]
+    },
+    "shell_env_allow": {
+      "description": "Environment variable names a `shell` command inherits without naming\nthem in its `env` argument. Unset means PATH, HOME, USER, LANG,\nLC_ALL, TERM, PWD, SHELL.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "subagent_max_workers": {
+      "description": "Maximum workers one `task` call runs at once.",
+      "type": "integer",
+      "format": "uint",
+      "default": 0,
+      "minimum": 0
     },
     "subagents": {
       "description": "Enables subagent support via the task tool; when true the forge agent\ngains access to the `task` tool for delegating work to specialised\nsub-agents, and the `sage` research-only agent tool is removed.\nWhen false the `task` tool is disabled and `sage` is available instead.",
@@ -311,6 +331,13 @@
         }
       ]
     },
+    "task_max_depth": {
+      "description": "Maximum nesting depth of `task` workers (a worker's own task calls\ncount one level deeper).",
+      "type": "integer",
+      "format": "uint",
+      "default": 0,
+      "minimum": 0
+    },
     "temperature": {
       "description": "Output randomness for all agents; lower values are deterministic, higher\nvalues are creative (0.0–2.0).",
       "anyOf": [
@@ -322,13 +349,30 @@
         }
       ]
     },
+    "tool_alias_profiles": {
+      "description": "Model-facing tool names for matching models (X23); the first profile\nwhose `match` hits the model or provider id applies.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ToolAliasProfile"
+      }
+    },
+    "tool_bans": {
+      "description": "X18: argument ban patterns, tool name → bans. A call whose argument\nmatches a ban's regex is refused before it runs. Always on, also\nwithout `--restricted`.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/ToolBan"
+        }
+      }
+    },
     "tool_supported": {
       "description": "Whether tool use is supported in the current environment; when false,\nall tool calls are disabled.",
       "type": "boolean",
       "default": false
     },
     "tool_timeout_secs": {
-      "description": "Maximum time in seconds a single tool call may run before being\ncancelled.",
+      "description": "Backstop in seconds for a tool call that does not bound its own run\ntime (default 600); 0 disables it. Tools with their own window or\ntimeout are not subject to it.",
       "type": "integer",
       "format": "uint64",
       "default": 0,
@@ -370,11 +414,6 @@
       "type": "boolean",
       "default": false
     },
-    "use_text_patch_fallback": {
-      "description": "Switches patch replacement fallback from the legacy fuzzy-search range\nlookup to the newer text-patch gRPC API.\nDefaults to `false` so patching continues to use the legacy fallback\nbehavior unless explicitly enabled in `forge.toml`.",
-      "type": "boolean",
-      "default": false
-    },
     "verify_todos": {
       "description": "Enables the pending todos hook that checks for incomplete todo items\nwhen a task ends and reminds the LLM about them.",
       "type": "boolean",
@@ -382,6 +421,29 @@
     }
   },
   "$defs": {
+    "AllowDeny": {
+      "description": "Allow/deny glob lists.",
+      "type": "object",
+      "properties": {
+        "allow": {
+          "description": "Globs that are allowed; absent allows everything.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "deny": {
+          "description": "Globs that are denied; deny wins over allow.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
     "AutoDumpFormat": {
       "description": "The output format used when auto-dumping a conversation on task completion.",
       "oneOf": [
@@ -516,6 +578,61 @@
         }
       ]
     },
+    "HookEvent": {
+      "description": "Events a user hook can run on (X19). js's events that have a forgecode\ncounterpart; the input/stream/MCP-notification events have none.",
+      "oneOf": [
+        {
+          "description": "Before a tool call runs; exit status 2 refuses the call.",
+          "type": "string",
+          "const": "tool_call"
+        },
+        {
+          "description": "After a tool call returned.",
+          "type": "string",
+          "const": "tool_result"
+        },
+        {
+          "description": "When a turn starts (a user message).",
+          "type": "string",
+          "const": "turn_start"
+        },
+        {
+          "description": "When a turn ends.",
+          "type": "string",
+          "const": "turn_end"
+        },
+        {
+          "description": "After each model response.",
+          "type": "string",
+          "const": "response"
+        },
+        {
+          "description": "A tool call failed.",
+          "type": "string",
+          "const": "error"
+        },
+        {
+          "description": "Before the conversation is compacted.",
+          "type": "string",
+          "const": "pre_compact"
+        },
+        {
+          "description": "After the conversation was compacted.",
+          "type": "string",
+          "const": "post_compact"
+        },
+        {
+          "description": "When forge starts a session (interactive or `-p`).",
+          "type": "string",
+          "const": "session_start"
+        },
+        {
+          "description": "When forge exits.",
+          "type": "string",
+          "const": "session_end"
+        }
+      ]
+    },
     "HttpConfig": {
       "description": "HTTP client configuration.",
       "type": "object",
@@ -639,6 +756,33 @@
           "const": "image"
         }
       ]
+    },
+    "McpAgentPolicy": {
+      "description": "MCP policy for one agent (M4): which servers and which tools (by their\n`{server}__{tool}` name) it may use.",
+      "type": "object",
+      "properties": {
+        "servers": {
+          "$ref": "#/$defs/AllowDeny",
+          "default": {}
+        },
+        "tools": {
+          "$ref": "#/$defs/AllowDeny",
+          "default": {}
+        }
+      }
+    },
+    "McpSettings": {
+      "description": "`[mcp]` settings.",
+      "type": "object",
+      "properties": {
+        "agents": {
+          "description": "Per-agent server and tool policy, keyed by agent id.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/McpAgentPolicy"
+          }
+        }
+      }
     },
     "Model": {
       "type": "object",
@@ -995,6 +1139,57 @@
         "1.3"
       ]
     },
+    "ToolAliasProfile": {
+      "description": "Model-facing tool names for models whose id or provider matches (X23).",
+      "type": "object",
+      "properties": {
+        "aliases": {
+          "description": "Canonical tool name → name shown to the model (e.g. `read = \"Read\"`).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "match": {
+          "description": "Case-insensitive substrings tested against the model id and the\nprovider id; the first profile with a hit applies.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "match",
+        "aliases"
+      ]
+    },
+    "ToolBan": {
+      "description": "X18: one argument ban (`[[tool_bans.shell]] arg = \"command\" pattern =\n\"rm -rf\"`).",
+      "type": "object",
+      "properties": {
+        "arg": {
+          "description": "Argument name to test; absent or `*` tests every string argument.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pattern": {
+          "description": "Regex searched in the argument's value.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "What the model reads when the ban applies.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "pattern"
+      ]
+    },
     "Update": {
       "description": "Configuration for automatic forge updates",
       "type": "object",
@@ -1027,6 +1222,39 @@
         "weekly",
         "never",
         "always"
+      ]
+    },
+    "UserHook": {
+      "description": "A user hook (X19): `command` runs under `sh -c` with the event as one JSON\nobject on stdin (Claude Code's protocol). Under `tool_call`, exit status 2\nrefuses the call and the first line of stderr (else stdout) is what the\nmodel reads.",
+      "type": "object",
+      "properties": {
+        "command": {
+          "description": "Shell command to run.",
+          "type": "string"
+        },
+        "event": {
+          "$ref": "#/$defs/HookEvent"
+        },
+        "timeout_secs": {
+          "description": "Seconds before the hook's process group is killed (default 30).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "tools": {
+          "description": "Only for these tools (exact names); empty means every tool.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "event",
+        "command"
       ]
     },
     "double": {

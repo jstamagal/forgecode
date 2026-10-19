@@ -189,6 +189,14 @@ mod tests {
                 )))
             }
         }
+
+        async fn read_tool(
+            &self,
+            _: crate::ReadRequest,
+            _: &forge_domain::ToolCallContext,
+        ) -> anyhow::Result<crate::ReadOutput> {
+            unimplemented!()
+        }
     }
 
     #[tokio::test]

@@ -63,7 +63,11 @@ fn filter_base64_images_from_tool_output(output: &ToolOutput) -> ToolOutput {
         })
         .collect();
 
-    ToolOutput { is_error: output.is_error, values: filtered_values }
+    ToolOutput {
+        is_error: output.is_error,
+        values: filtered_values,
+        uncounted: false,
+    }
 }
 
 impl ContextMessage {
@@ -630,11 +634,33 @@ impl Context {
         }
     }
 
+    /// Approximate tokens of everything a request sends: the messages and
+    /// (X26) the tool definitions, whose descriptions and schemas go out with
+    /// every request.
     pub fn token_count_approx(&self) -> usize {
-        self.messages
+        let messages = self
+            .messages
             .iter()
             .map(|m| m.token_count_approx())
-            .sum::<usize>()
+            .sum::<usize>();
+        messages + self.tools_token_count_approx()
+    }
+
+    /// Approximate tokens of the tool definitions (description and schema,
+    /// 4 characters per token).
+    pub fn tools_token_count_approx(&self) -> usize {
+        let chars: usize = self
+            .tools
+            .iter()
+            .map(|tool| {
+                tool.name.as_str().len()
+                    + tool.description.chars().count()
+                    + serde_json::to_string(&tool.input_schema)
+                        .map(|s| s.len())
+                        .unwrap_or_default()
+            })
+            .sum();
+        chars.div_ceil(4)
     }
 
     /// Checks if reasoning is enabled by user or not.
@@ -875,6 +901,19 @@ mod tests {
     }
 
     #[test]
+    fn test_token_count_approx_includes_tool_definitions() {
+        let fixture = Context::default().add_message(ContextMessage::system("abcd"));
+        let with_tools = fixture.clone().tools(vec![
+            crate::ToolDefinition::new("read").description("x".repeat(400)),
+        ]);
+
+        let actual = with_tools.token_count_approx() - fixture.token_count_approx();
+
+        // name (4) + description (400) + schema JSON, at 4 chars per token.
+        assert!((101..=130).contains(&actual), "{actual}");
+    }
+
+    #[test]
     fn test_update_image_tool_calls_empty_context() {
         let fixture = Context::default();
         let mut transformer = crate::transformer::ImageHandling::new();
@@ -916,6 +955,7 @@ mod tests {
                     output: crate::ToolOutput {
                         values: vec![crate::ToolValue::Empty],
                         is_error: false,
+                        uncounted: false,
                     },
                 },
             ]);
@@ -958,6 +998,7 @@ mod tests {
                     crate::ToolValue::Image(image2),
                 ],
                 is_error: false,
+                uncounted: false,
             },
         }]);
 
@@ -1020,6 +1061,7 @@ mod tests {
                         crate::ToolValue::Empty,
                     ],
                     is_error: false,
+                    uncounted: false,
                 },
             }]);
 
@@ -1038,6 +1080,7 @@ mod tests {
             output: crate::ToolOutput {
                 values: vec![crate::ToolValue::Image(image)],
                 is_error: true,
+                uncounted: false,
             },
         }]);
 

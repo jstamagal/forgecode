@@ -19,7 +19,6 @@ use crate::services::{AgentRegistry, CustomInstructionsService, ProviderAuthServ
 use crate::set_conversation_id::SetConversationId;
 use crate::system_prompt::SystemPrompt;
 use crate::tool_registry::ToolRegistry;
-use crate::tool_resolver::ToolResolver;
 use crate::user_prompt::UserPromptGenerator;
 use crate::{
     AgentExt, AgentProviderResolver, ConversationService, EnvironmentInfra, FileDiscoveryService,
@@ -33,12 +32,34 @@ use crate::{
 pub(crate) fn build_template_config(config: &ForgeConfig) -> forge_domain::TemplateConfig {
     forge_domain::TemplateConfig {
         max_read_size: config.max_read_lines as usize,
-        max_line_length: config.max_line_chars,
+        max_read_bytes: config.max_read_bytes as usize,
         max_image_size: config.max_image_size_bytes as usize,
-        stdout_max_prefix_length: config.max_stdout_prefix_lines,
-        stdout_max_suffix_length: config.max_stdout_suffix_lines,
-        stdout_max_line_length: config.max_stdout_line_chars,
     }
+}
+
+/// Appends one droppable reminder per background `task` run of this
+/// conversation that finished since the last turn and has not been read, and
+/// (X19) one per queued hook output. Worker conversations (depth > 0) get
+/// only their own task notes.
+fn add_task_notes(mut conversation: Conversation, agent: &Agent, depth: usize) -> Conversation {
+    let mut notes = crate::tool_registry::task_jobs().completion_notes(&conversation.id);
+    if depth == 0 {
+        notes.extend(crate::user_hooks::take_reminders());
+    }
+    if notes.is_empty() {
+        return conversation;
+    }
+    let mut context = conversation.context.take().unwrap_or_default();
+    for note in notes {
+        let text = forge_template::Element::new("system_reminder")
+            .text(note)
+            .to_string();
+        let message = TextMessage::new(Role::User, text)
+            .droppable(true)
+            .model(agent.model.clone());
+        context = context.add_message(ContextMessage::from(message));
+    }
+    conversation.context(context)
 }
 
 /// ForgeApp handles the core chat functionality by orchestrating various
@@ -89,6 +110,11 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ForgeAp
             .ok_or(crate::Error::AgentNotFound(agent_id.clone()))?
             .apply_config(&forge_config)
             .set_compact_model_if_none();
+        // A `task` worker may run on another model than its agent's.
+        let agent = match chat.model_override.clone() {
+            Some(model) => agent.model(model),
+            None => agent,
+        };
 
         let agent_provider = agent_provider_resolver
             .get_provider(Some(agent.id.clone()))
@@ -99,15 +125,20 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ForgeAp
             .refresh_provider_credential(agent_provider)
             .await?;
 
+        let provider_id = agent_provider.id.to_string();
         let models = services.models(agent_provider).await?;
         let selected_model = models.iter().find(|model| model.id == agent.model);
         let agent = agent.compaction_threshold(selected_model);
 
-        // Get system and mcp tool definitions and resolve them for the agent
-        let all_tool_definitions = self.tool_registry.list().await?;
-        let tool_resolver = ToolResolver::new(all_tool_definitions);
-        let tool_definitions: Vec<ToolDefinition> =
-            tool_resolver.resolve(&agent).into_iter().cloned().collect();
+        // T24: the agent's tool surface for this request (eager tools, lazy
+        // catalog, skills, MCP status rows); tools loaded earlier in the
+        // conversation are published again.
+        let (surface, aliases) = self
+            .tool_registry
+            .request_surface(&agent, selected_model.cloned(), &provider_id)
+            .await?;
+        let surface_state = conversation.metrics.surface.snapshot();
+        let tool_definitions: Vec<ToolDefinition> = surface.published(&surface_state);
         let max_tool_failure_per_turn = agent.max_tool_failure_per_turn.unwrap_or(3);
 
         let current_time = Local::now();
@@ -121,6 +152,7 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ForgeAp
                 .files(files.clone())
                 .max_extensions(forge_config.max_extensions)
                 .template_config(build_template_config(&forge_config))
+                .aliases(aliases.clone())
                 .add_system_message(conversation)
                 .await?;
 
@@ -139,9 +171,16 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ForgeAp
             .update_file_stats(conversation)
             .await;
 
+        // T22: background tasks that finished unread since the last turn;
+        // X19: queued hook output.
+        let conversation = add_task_notes(conversation, &agent, chat.task_depth);
+
         let conversation = InitConversationMetrics::new(current_time).apply(conversation);
-        let conversation = ApplyTunableParameters::new(agent.clone(), tool_definitions.clone())
-            .apply(conversation);
+        let conversation = ApplyTunableParameters::new(
+            agent.clone(),
+            crate::tool_surface::apply_aliases(tool_definitions.clone(), &aliases),
+        )
+        .apply(conversation);
         let conversation = SetConversationId.apply(conversation);
 
         // Create the orchestrator with all necessary dependencies
@@ -180,7 +219,10 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ForgeAp
         .error_tracker(ToolErrorTracker::new(max_tool_failure_per_turn))
         .tool_definitions(tool_definitions)
         .models(models)
-        .hook(Arc::new(hook));
+        .hook(Arc::new(hook))
+        .task_depth(chat.task_depth)
+        .surface(surface)
+        .aliases(aliases);
 
         // Create and return the stream
         let stream = MpscStream::spawn(

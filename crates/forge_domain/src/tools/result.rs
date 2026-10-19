@@ -7,6 +7,14 @@ use crate::{ConversationId, Image, ToolCallFull, ToolCallId, ToolName};
 const REFLECTION_PROMPT: &str =
     include_str!("../../../../templates/forge-partial-tool-error-reflection.md");
 
+/// A refusal that is not the model's mistake with the tool itself: the tool
+/// is unavailable or blocked, or a jail/ban/hook refused the call. It is
+/// returned to the model as an error but does not count toward the
+/// repeated-tool-failure limit.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
+pub struct ToolRefusal(pub String);
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Setters)]
 #[setters(into)]
 pub struct ToolResult {
@@ -39,12 +47,19 @@ impl ToolResult {
         self.output.is_error
     }
 
+    /// Whether this result is an error that counts toward the
+    /// repeated-tool-failure limit (refusals do not).
+    pub fn is_counted_error(&self) -> bool {
+        self.output.is_error && !self.output.uncounted
+    }
+
     pub fn output(mut self, result: Result<ToolOutput, anyhow::Error>) -> Self {
         match result {
             Ok(output) => {
                 self.output = output;
             }
             Err(err) => {
+                let refusal = err.downcast_ref::<ToolRefusal>().is_some();
                 let mut message = vec![err.to_string()];
                 let mut source = err.source();
                 if source.is_some() {
@@ -62,7 +77,8 @@ impl ToolResult {
                         .append(Element::new("cause").cdata(message.join("\n")))
                         .append(Element::new("reflection").text(REFLECTION_PROMPT)),
                 )
-                .is_error(true);
+                .is_error(true)
+                .uncounted(refusal);
             }
         }
         self
@@ -84,6 +100,10 @@ impl From<ToolCallFull> for ToolResult {
 pub struct ToolOutput {
     pub is_error: bool,
     pub values: Vec<ToolValue>,
+    /// A refusal error that does not count toward the repeated-failure
+    /// limit. Only meaningful within the turn that produced it.
+    #[serde(default, skip)]
+    pub uncounted: bool,
 }
 
 impl ToolOutput {
@@ -91,6 +111,7 @@ impl ToolOutput {
         ToolOutput {
             is_error: Default::default(),
             values: vec![ToolValue::Text(tool.to_string())],
+            uncounted: false,
         }
     }
 
@@ -98,11 +119,16 @@ impl ToolOutput {
         ToolOutput {
             is_error: Default::default(),
             values: vec![ToolValue::AI { value: output.to_string(), conversation_id: id }],
+            uncounted: false,
         }
     }
 
     pub fn image(img: Image) -> Self {
-        ToolOutput { is_error: false, values: vec![ToolValue::Image(img)] }
+        ToolOutput {
+            is_error: false,
+            values: vec![ToolValue::Image(img)],
+            uncounted: false,
+        }
     }
 
     pub fn combine_mut(&mut self, value: ToolOutput) {
@@ -112,7 +138,11 @@ impl ToolOutput {
     pub fn combine(self, other: ToolOutput) -> Self {
         let mut items = self.values;
         items.extend(other.values);
-        ToolOutput { values: items, is_error: self.is_error || other.is_error }
+        ToolOutput {
+            values: items,
+            is_error: self.is_error || other.is_error,
+            uncounted: self.uncounted && other.uncounted,
+        }
     }
 
     /// Returns the first item as a string if it exists
@@ -183,5 +213,21 @@ mod tests {
         );
         assert!(failure.is_error());
         insta::assert_snapshot!(failure.output.as_str().unwrap());
+    }
+
+    #[test]
+    fn test_refusal_is_an_uncounted_error() {
+        let fixture = ToolResult::new(ToolName::new("read"));
+        let refused = fixture
+            .clone()
+            .failure(anyhow::Error::new(ToolRefusal("blocked".to_string())));
+        let failed = fixture.failure(anyhow::anyhow!("boom"));
+        let actual = (
+            refused.is_error(),
+            refused.is_counted_error(),
+            failed.is_counted_error(),
+        );
+        let expected = (true, false, true);
+        assert_eq!(actual, expected);
     }
 }

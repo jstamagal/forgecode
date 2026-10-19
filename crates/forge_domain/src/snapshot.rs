@@ -1,148 +1,136 @@
-use std::fmt::{Display, Formatter};
-use std::hash::Hasher;
-use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+//! Undo snapshot data model shared by the file tools and the snapshot store.
 
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
-/// A newtype for snapshot IDs, internally using UUID
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct SnapshotId(Uuid);
-
-impl SnapshotId {
-    /// Create a new random SnapshotId
-    pub fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-
-    /// Parse a SnapshotId from a string
-    pub fn parse(s: &str) -> Option<Self> {
-        Uuid::parse_str(s).ok().map(Self)
-    }
-
-    /// Get the underlying UUID
-    pub fn uuid(&self) -> &Uuid {
-        &self.0
-    }
+/// Read coverage carried by a file snapshot. It is restored by an undo only
+/// when the restored bytes hash to `hash`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SnapshotCoverage {
+    /// Content hash the coverage describes.
+    pub hash: String,
+    /// Line spans the model had seen.
+    #[serde(default)]
+    pub ranges: Vec<(u64, u64)>,
+    /// Whether every line had been seen.
+    #[serde(default)]
+    pub whole: bool,
 }
 
-impl Default for SnapshotId {
-    fn default() -> Self {
-        Self::new()
-    }
+/// One node of a directory snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TreeEntry {
+    /// A regular file with its bytes and permission mode.
+    File {
+        #[serde(with = "b64")]
+        data: Vec<u8>,
+        mode: u32,
+    },
+    /// A directory and its permission mode.
+    Dir { mode: u32 },
+    /// A symlink and its target.
+    Symlink { target: String },
 }
 
-impl Display for SnapshotId {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
+/// The state a path had before a mutation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SnapshotData {
+    /// The path did not exist; undo deletes whatever is there.
+    Missing,
+    /// A regular file.
+    File {
+        #[serde(with = "b64")]
+        data: Vec<u8>,
+        mode: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        coverage: Option<SnapshotCoverage>,
+    },
+    /// A symlink, captured without following it.
+    Symlink { target: String },
+    /// A directory tree; names are `/`-separated paths relative to the root,
+    /// parents listed before children.
+    Directory {
+        mode: u32,
+        entries: Vec<(String, TreeEntry)>,
+    },
+    /// The capture failed or the entry could not be kept; undo discards it.
+    Unavailable { reason: String },
+    /// The stored entry could not be decoded; undo discards it.
+    Corrupt { reason: String },
 }
 
-impl From<Uuid> for SnapshotId {
-    fn from(uuid: Uuid) -> Self {
-        Self(uuid)
-    }
-}
-
-/// Represents information about a file snapshot
-///
-/// Contains details about when the snapshot was created,
-/// the original file path, the snapshot location, and file size.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Snapshot {
-    /// Unique ID for the file
-    pub id: SnapshotId,
-
-    /// Unix timestamp when the snapshot was created
-    pub timestamp: Duration,
-
-    /// Original file path that is being processed
-    pub path: String,
-}
-
-impl Snapshot {
-    pub fn create(path: PathBuf) -> anyhow::Result<Self> {
-        let path = match path.canonicalize() {
-            Ok(p) => p,
-            Err(_) => {
-                if path.is_absolute() {
-                    path
-                } else {
-                    anyhow::bail!(
-                        "Path must be absolute. Please provide an absolute path starting with '/' (Unix) or 'C:\\' (Windows)"
-                    );
-                }
-            }
-        };
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?;
-
-        Ok(Self {
-            id: SnapshotId::new(),
-            timestamp,
-            path: path.display().to_string(),
-        })
-    }
-
-    /// Create a hash of a file path for storage
-    pub fn path_hash(&self) -> String {
-        let mut hasher = fnv_rs::Fnv64::default();
-        hasher.write(self.path.as_bytes());
-        format!("{:x}", hasher.finish())
-    }
-
-    /// Create a snapshot filename from a path and timestamp
-    pub fn snapshot_path(&self, cwd: Option<PathBuf>) -> PathBuf {
-        // Convert Duration to SystemTime then to a formatted string
-        let datetime = UNIX_EPOCH + self.timestamp;
-        // Format: YYYY-MM-DD_HH-MM-SS-nnnnnnnnn (including nanoseconds)
-        let formatted_time = chrono::DateTime::<chrono::Utc>::from(datetime)
-            .format("%Y-%m-%d_%H-%M-%S-%9f")
-            .to_string();
-
-        let filename = format!("{formatted_time}.snap");
-        let path = PathBuf::from(self.path_hash()).join(PathBuf::from(filename));
-        if let Some(cwd) = cwd {
-            cwd.join(path)
-        } else {
-            path
+impl SnapshotData {
+    /// Raw payload size, used to decide whether the entry fits on disk.
+    pub fn raw_size(&self) -> u64 {
+        match self {
+            SnapshotData::File { data, .. } => data.len() as u64,
+            SnapshotData::Directory { entries, .. } => entries
+                .iter()
+                .map(|(name, entry)| {
+                    name.len() as u64
+                        + match entry {
+                            TreeEntry::File { data, .. } => data.len() as u64,
+                            TreeEntry::Symlink { target } => target.len() as u64,
+                            TreeEntry::Dir { .. } => 0,
+                        }
+                })
+                .sum(),
+            SnapshotData::Symlink { target } => target.len() as u64,
+            _ => 0,
         }
+    }
+}
+
+/// What an undo did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UndoOutcome {
+    /// No snapshot exists for the path.
+    NoSnapshot,
+    /// The newest snapshot was unusable and was discarded; an older one may
+    /// remain.
+    Discarded { reason: String },
+    /// A regular file was restored with these bytes.
+    RestoredFile {
+        data: Vec<u8>,
+        coverage: Option<SnapshotCoverage>,
+    },
+    /// A directory tree was restored.
+    RestoredDirectory,
+    /// A symlink was restored.
+    RestoredSymlink { target: String },
+    /// The path did not exist before; it was deleted.
+    RestoredDeletion,
+}
+
+mod b64 {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+    use serde::Deserialize;
+
+    pub fn serialize<S: serde::Serializer>(data: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&STANDARD.encode(data))
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<u8>, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        STANDARD.decode(text).map_err(serde::de::Error::custom)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use pretty_assertions::assert_eq;
+
     use super::*;
 
     #[test]
-    fn test_create_with_nonexistent_absolute_path() {
-        // Test with a non-existent absolute path
-        let nonexistent_path = PathBuf::from("/this/path/does/not/exist/file.txt");
-        let snapshot = Snapshot::create(nonexistent_path.clone()).unwrap();
-
-        assert!(!snapshot.id.to_string().is_empty());
-        assert!(snapshot.timestamp.as_secs() > 0);
-        // Should use the original absolute path since canonicalize fails
-        assert_eq!(snapshot.path, nonexistent_path.display().to_string());
-    }
-
-    #[test]
-    fn test_create_with_nonexistent_relative_path() {
-        // Test with a non-existent relative path
-        let nonexistent_path = PathBuf::from("nonexistent/file.txt");
-        let snapshot = Snapshot::create(nonexistent_path.clone());
-        assert!(snapshot.is_err());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn test_create_with_nonexistent_absolute_windows_path() {
-        // Test with Windows-style absolute path that doesn't exist
-        let nonexistent_path = PathBuf::from("C:\\nonexistent\\windows\\path\\file.txt");
-        let snapshot = Snapshot::create(nonexistent_path.clone()).unwrap();
-
-        assert!(!snapshot.id.to_string().is_empty());
-        assert!(snapshot.timestamp.as_secs() > 0);
-        assert_eq!(snapshot.path, nonexistent_path.display().to_string());
+    fn test_snapshot_data_round_trips_bytes_as_base64() {
+        let fixture = SnapshotData::File { data: vec![0, 159, 255], mode: 0o644, coverage: None };
+        let json = serde_json::to_string(&fixture).unwrap();
+        let actual: SnapshotData = serde_json::from_str(&json).unwrap();
+        assert_eq!(actual, fixture);
     }
 }

@@ -68,15 +68,16 @@ impl FormatContent for ToolCatalog {
                 };
                 Some(TitleFormat::debug(title).into())
             }
-            ToolCatalog::SemSearch(input) => {
-                let pairs: Vec<_> = input
-                    .queries
-                    .iter()
-                    .map(|item| item.query.as_str())
-                    .collect();
+            ToolCatalog::AstSearch(input) => {
+                let at = display_path_for(input.path.as_deref().unwrap_or("."));
+                let verb = match (&input.rewrite, input.apply) {
+                    (Some(_), true) => "Rewrite",
+                    (Some(_), false) => "Preview rewrite",
+                    (None, _) => "AST search",
+                };
                 Some(
-                    TitleFormat::debug("Codebase Search")
-                        .sub_title(format!("[{}]", pairs.join(" · ")))
+                    TitleFormat::debug(verb)
+                        .sub_title(format!("{} at {at}", input.pattern))
                         .into(),
                 )
             }
@@ -86,40 +87,50 @@ impl FormatContent for ToolCatalog {
             }
             ToolCatalog::Patch(input) => {
                 let display_path = display_path_for(&input.file_path);
-                let operation_name = if input.replace_all {
-                    "Replace All"
-                } else {
-                    "Replace"
-                };
-                Some(
-                    TitleFormat::debug(operation_name)
-                        .sub_title(display_path)
-                        .into(),
-                )
-            }
-            ToolCatalog::MultiPatch(input) => {
-                let display_path = display_path_for(&input.file_path);
-                Some(
-                    TitleFormat::debug("Replace")
-                        .sub_title(format!("{} ({} edits)", display_path, input.edits.len()))
-                        .into(),
-                )
+                match &input.edits {
+                    Some(edits) => Some(
+                        TitleFormat::debug("Replace")
+                            .sub_title(format!("{} ({} edits)", display_path, edits.len()))
+                            .into(),
+                    ),
+                    None => {
+                        let operation_name = if input.replace_all {
+                            "Replace All"
+                        } else {
+                            "Replace"
+                        };
+                        Some(
+                            TitleFormat::debug(operation_name)
+                                .sub_title(display_path)
+                                .into(),
+                        )
+                    }
+                }
             }
             ToolCatalog::Undo(input) => {
                 let display_path = display_path_for(&input.path);
                 Some(TitleFormat::debug("Undo").sub_title(display_path).into())
             }
-            ToolCatalog::Shell(input) => Some(
-                TitleFormat::debug(format!("Execute [{}]", env.shell))
-                    .sub_title(&input.command)
-                    .into(),
-            ),
-            ToolCatalog::Fetch(input) => {
-                Some(TitleFormat::debug("GET").sub_title(&input.url).into())
-            }
-            ToolCatalog::Followup(input) => Some(
-                TitleFormat::debug("Follow-up")
-                    .sub_title(&input.question)
+            ToolCatalog::Shell(input) => Some(match input.action {
+                forge_domain::ShellAction::Run => {
+                    TitleFormat::debug(format!("Execute [{}]", env.shell))
+                        .sub_title(&input.command)
+                        .into()
+                }
+                action => TitleFormat::debug(match action {
+                    forge_domain::ShellAction::Poll => "Shell poll",
+                    forge_domain::ShellAction::Wait => "Shell wait",
+                    _ => "Shell kill",
+                })
+                .sub_title(format!(
+                    "handle {}",
+                    input.handle.as_deref().unwrap_or("latest")
+                ))
+                .into(),
+            }),
+            ToolCatalog::Fetch(input) => Some(
+                TitleFormat::debug(input.method())
+                    .sub_title(&input.url)
                     .into(),
             ),
             ToolCatalog::Plan(_) => None,
@@ -137,6 +148,127 @@ impl FormatContent for ToolCatalog {
             ToolCatalog::Task(input) => {
                 Some(TitleFormat::debug("Task").sub_title(&input.agent_id).into())
             }
+            ToolCatalog::ToolDiscovery(input) => Some(match &input.load {
+                Some(id) => TitleFormat::debug("Load tool").sub_title(id).into(),
+                None => TitleFormat::debug("Discover tools")
+                    .sub_title(&input.query)
+                    .into(),
+            }),
+            ToolCatalog::McpResourceList(input)
+            | ToolCatalog::McpResourceTemplates(input)
+            | ToolCatalog::McpPromptList(input) => Some(
+                TitleFormat::debug(self.to_string())
+                    .sub_title(&input.server)
+                    .into(),
+            ),
+            ToolCatalog::McpResourceRead(input)
+            | ToolCatalog::McpResourceSubscribe(input)
+            | ToolCatalog::McpResourceUnsubscribe(input) => Some(
+                TitleFormat::debug(self.to_string())
+                    .sub_title(format!("{} {}", input.server, input.uri))
+                    .into(),
+            ),
+            ToolCatalog::McpPromptGet(input) => Some(
+                TitleFormat::debug(self.to_string())
+                    .sub_title(format!("{} {}", input.server, input.name))
+                    .into(),
+            ),
+            ToolCatalog::TerminalSession(input) => Some(
+                TitleFormat::debug(format!("Terminal {}", input.action))
+                    .sub_title(
+                        input
+                            .command
+                            .clone()
+                            .or_else(|| input.keys.clone())
+                            .unwrap_or_else(|| {
+                                input.session.clone().unwrap_or_else(|| "main".to_string())
+                            }),
+                    )
+                    .into(),
+            ),
+            ToolCatalog::TerminalSnapshot(input) => Some(
+                TitleFormat::debug("Terminal snapshot")
+                    .sub_title(input.session.clone().unwrap_or_else(|| "main".to_string()))
+                    .into(),
+            ),
+            ToolCatalog::Lsp(input) => Some(
+                TitleFormat::debug(format!("LSP {}", input.operation))
+                    .sub_title(display_path_for(&input.file_path))
+                    .into(),
+            ),
+            ToolCatalog::Kernel(input) => Some(
+                TitleFormat::debug(format!(
+                    "Kernel {}",
+                    input.action.as_deref().unwrap_or("run")
+                ))
+                .sub_title(
+                    input
+                        .code
+                        .as_deref()
+                        .and_then(|c| c.lines().next())
+                        .unwrap_or_default(),
+                )
+                .into(),
+            ),
+            ToolCatalog::Toolbox(input) => Some(
+                TitleFormat::debug(format!(
+                    "Toolbox {}",
+                    input.action.as_deref().unwrap_or("list")
+                ))
+                .sub_title(input.name.clone().unwrap_or_default())
+                .into(),
+            ),
+            ToolCatalog::Browse(input) => {
+                Some(TitleFormat::debug("Browse").sub_title(&input.url).into())
+            }
+            ToolCatalog::BrowserProbe(input) => Some(
+                TitleFormat::debug("Browser probe")
+                    .sub_title(&input.target)
+                    .into(),
+            ),
+            ToolCatalog::SerperSearch(input) => Some(
+                TitleFormat::debug("Serper search")
+                    .sub_title(&input.query)
+                    .into(),
+            ),
+            ToolCatalog::TavilySearch(input) => Some(
+                TitleFormat::debug("Tavily search")
+                    .sub_title(&input.query)
+                    .into(),
+            ),
+            ToolCatalog::ExaSearch(input) => Some(
+                TitleFormat::debug("Exa search")
+                    .sub_title(&input.query)
+                    .into(),
+            ),
+            ToolCatalog::DocsSearch(input) => Some(
+                TitleFormat::debug("Docs search")
+                    .sub_title(&input.library)
+                    .into(),
+            ),
+            ToolCatalog::NotebookEdit(input) => Some(
+                TitleFormat::debug(format!(
+                    "Notebook {}",
+                    input.edit_mode.as_deref().unwrap_or("replace")
+                ))
+                .sub_title(display_path_for(&input.file_path))
+                .into(),
+            ),
+            ToolCatalog::WikiConvert(input) => Some(
+                TitleFormat::debug("Wiki convert")
+                    .sub_title(display_path_for(&input.file_path))
+                    .into(),
+            ),
+            ToolCatalog::WikiWrite(input) => Some(
+                TitleFormat::debug("Wiki write")
+                    .sub_title(&input.title)
+                    .into(),
+            ),
+            ToolCatalog::WikiFinishIngest(input) => Some(
+                TitleFormat::debug("Wiki finish ingest")
+                    .sub_title(&input.source)
+                    .into(),
+            ),
         }
     }
 }
