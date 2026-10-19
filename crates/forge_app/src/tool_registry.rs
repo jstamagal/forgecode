@@ -309,12 +309,17 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ToolReg
     /// each `tools.<name>(...)` as a direct call of this agent (same policy,
     /// schema, bans, hooks, read-before-edit), except `kernel`, `toolbox` and
     /// `task`, which a cell cannot call.
-    async fn run_kernel(
-        &self,
-        agent: &Agent,
+    ///
+    /// Returns an explicit boxed `Send` future: the cell bridge calls back
+    /// into `call_with_bounds` -> `call` -> `run_kernel`, and stable rustc
+    /// cannot prove `Send` through that recursive opaque-future cycle.
+    fn run_kernel<'a>(
+        &'a self,
+        agent: &'a Agent,
         input: forge_domain::Kernel,
-        context: &ToolCallContext,
-    ) -> anyhow::Result<ToolOutput> {
+        context: &'a ToolCallContext,
+    ) -> futures::future::BoxFuture<'a, anyhow::Result<ToolOutput>> {
+        Box::pin(async move {
         const NOT_FROM_CELL: [&str; 3] = ["kernel", "toolbox", "task"];
         let names: Vec<String> = context
             .surface()
@@ -362,6 +367,7 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ToolReg
             .run_kernel(input, cwd, context, bridge, names)
             .await?;
         Ok(ToolOutput::text(text))
+        })
     }
 
     /// T24: the `tool_discovery` tool. Searches the request's catalog or
